@@ -14,6 +14,8 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/notifier.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -219,14 +221,89 @@ enum ENUM_WLAN_DRV_BUF_TYPE_T {
 typedef uint8_t(*file_buf_handler)(void *ctx, const char __user *buf, uint16_t length);
 static file_buf_handler buf_handler[BUF_TYPE_NUM];
 static void *buf_handler_ctx[BUF_TYPE_NUM];
+static struct module *buf_handler_owner[BUF_TYPE_NUM];
+static DEFINE_SPINLOCK(buf_handler_lock);
+
 void register_file_buf_handler(file_buf_handler handler, void *handler_ctx, uint8_t ucType)
 {
-	if (ucType < BUF_TYPE_NUM) {
-		buf_handler[ucType] = handler;
-		buf_handler_ctx[ucType] = handler_ctx;
+	unsigned long flags;
+	struct module *owner, *prev_owner;
+
+	if (ucType >= BUF_TYPE_NUM)
+		return;
+
+	spin_lock_irqsave(&buf_handler_lock, flags);
+	owner = handler ? __module_address((unsigned long)handler) : NULL;
+	prev_owner = buf_handler_owner[ucType];
+	if (handler && owner && buf_handler[ucType] && owner != prev_owner &&
+	    (prev_owner == NULL || try_module_get(prev_owner))) {
+		if (prev_owner)
+			module_put(prev_owner);
+		spin_unlock_irqrestore(&buf_handler_lock, flags);
+		WIFI_ERR_FUNC("Ignore handler %p of type %u: owned by %s\n",
+				handler, ucType, module_name(prev_owner));
+		return;
 	}
+	buf_handler[ucType] = handler;
+	buf_handler_ctx[ucType] = handler_ctx;
+	buf_handler_owner[ucType] = owner;
+	spin_unlock_irqrestore(&buf_handler_lock, flags);
 }
 EXPORT_SYMBOL(register_file_buf_handler);
+
+static file_buf_handler get_file_buf_handler(uint8_t ucType, void **ctx,
+					     struct module **owner)
+{
+	file_buf_handler handler;
+	unsigned long flags;
+
+	*ctx = NULL;
+	*owner = NULL;
+
+	spin_lock_irqsave(&buf_handler_lock, flags);
+	handler = buf_handler[ucType];
+	if (handler && buf_handler_owner[ucType] &&
+	    !try_module_get(buf_handler_owner[ucType])) {
+		buf_handler[ucType] = NULL;
+		buf_handler_ctx[ucType] = NULL;
+		buf_handler_owner[ucType] = NULL;
+		handler = NULL;
+	}
+	if (handler) {
+		*ctx = buf_handler_ctx[ucType];
+		*owner = buf_handler_owner[ucType];
+	}
+	spin_unlock_irqrestore(&buf_handler_lock, flags);
+
+	return handler;
+}
+
+static int buf_handler_module_notify(struct notifier_block *nb,
+				     unsigned long val, void *data)
+{
+	struct module *mod = data;
+	unsigned long flags;
+	int i;
+
+	if (val != MODULE_STATE_GOING)
+		return NOTIFY_DONE;
+
+	spin_lock_irqsave(&buf_handler_lock, flags);
+	for (i = 0; i < BUF_TYPE_NUM; i++) {
+		if (buf_handler_owner[i] == mod) {
+			buf_handler[i] = NULL;
+			buf_handler_ctx[i] = NULL;
+			buf_handler_owner[i] = NULL;
+		}
+	}
+	spin_unlock_irqrestore(&buf_handler_lock, flags);
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block buf_handler_module_nb = {
+	.notifier_call = buf_handler_module_notify,
+};
 
 /*******************************************************************
  *  WHOLE CHIP RESET PROCEDURE:
@@ -482,6 +559,7 @@ ssize_t WIFI_write(struct file *filp, const char __user *buf, size_t count, loff
 			}
 		} else if (!strncmp(local, "WR-BUF:", 7)) {
 			file_buf_handler handler = NULL;
+			struct module *handler_owner = NULL;
 			void *ctx = NULL;
 
 			if (!strncmp(&local[7], "NVRAM", 5)) {
@@ -489,8 +567,9 @@ ssize_t WIFI_write(struct file *filp, const char __user *buf, size_t count, loff
 				buf += 12;
 				wait_cnt = 0;
 				while (wait_cnt < 20) {
-					handler = buf_handler[BUF_TYPE_NVRAM];
-					ctx = buf_handler_ctx[BUF_TYPE_NVRAM];
+					handler = get_file_buf_handler(
+							BUF_TYPE_NVRAM,
+							&ctx, &handler_owner);
 					if (handler)
 						break;
 					msleep(100);
@@ -504,34 +583,43 @@ ssize_t WIFI_write(struct file *filp, const char __user *buf, size_t count, loff
 			} else if (!strncmp(&local[7], "DRVCFG", 6)) {
 				copy_size = count - 13;
 				buf += 13;
-				handler = buf_handler[BUF_TYPE_DRV_CFG];
-				ctx = buf_handler_ctx[BUF_TYPE_DRV_CFG];
+				handler = get_file_buf_handler(
+						BUF_TYPE_DRV_CFG,
+						&ctx, &handler_owner);
 			} else if (!strncmp(&local[7], "FWCFG", 5)) {
 				copy_size = count - 12;
 				buf += 12;
-				handler = buf_handler[BUF_TYPE_FW_CFG];
-				ctx = buf_handler_ctx[BUF_TYPE_FW_CFG];
+				handler = get_file_buf_handler(
+						BUF_TYPE_FW_CFG,
+						&ctx, &handler_owner);
 			}
 			if (handler && !handler(ctx, buf, (uint16_t)copy_size))
 				retval = count;
 			else
 				retval = -ENOTSUPP;
+			if (handler_owner)
+				module_put(handler_owner);
 		} else if (!strncmp(local, "RM-BUF:", 7)) {
 			file_buf_handler handler = NULL;
+			struct module *handler_owner = NULL;
 			void *ctx = NULL;
 
 			if (!strncmp(&local[7], "DRVCFG", 6)) {
-				handler = buf_handler[BUF_TYPE_DRV_CFG];
-				ctx = buf_handler_ctx[BUF_TYPE_DRV_CFG];
+				handler = get_file_buf_handler(
+						BUF_TYPE_DRV_CFG,
+						&ctx, &handler_owner);
 			} else if (!strncmp(&local[7], "FWCFG", 5)) {
-				handler = buf_handler[BUF_TYPE_FW_CFG];
-				ctx = buf_handler_ctx[BUF_TYPE_FW_CFG];
+				handler = get_file_buf_handler(
+						BUF_TYPE_FW_CFG,
+						&ctx, &handler_owner);
 			}
 
 			if (handler && !handler(ctx, NULL, 0))
 				retval = count;
 			else
 				retval = -ENOTSUPP;
+			if (handler_owner)
+				module_put(handler_owner);
 		} else if (local[0] == 'S' || local[0] == 'P' || local[0] == 'A') {
 			if (powered == 1 && driver_loaded == 0) {
 				WIFI_DBG_FUNC("In fact wifi is already turned off! reset related states.\n");
@@ -748,6 +836,7 @@ static int WIFI_init(void)
 #if (CFG_ANDORID_CONNINFRA_SUPPORT == 1)
 	wifi_pwr_on_init();
 #endif
+	register_module_notifier(&buf_handler_module_nb);
 	return 0;
 
 error:
@@ -785,6 +874,8 @@ static void WIFI_exit(void)
 
 	cdev_del(&WIFI_cdev);
 	unregister_chrdev_region(wifi_devno, WIFI_devs);
+
+	unregister_module_notifier(&buf_handler_module_nb);
 
 	WIFI_DBG_FUNC("%s driver removed\n", WIFI_DRIVER_NAME);
 
