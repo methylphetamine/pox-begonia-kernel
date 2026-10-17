@@ -2528,10 +2528,6 @@ static void wlanCreateWirelessDevice(void)
 		prWdev[u4Idx]->wiphy = prWiphy;
 		gprWdev[u4Idx] = prWdev[u4Idx];
 	}
-#if CFG_WLAN_ASSISTANT_NVRAM
-	register_file_buf_handler(wlanNvramBufHandler, (void *)NULL,
-			ENUM_BUF_TYPE_NVRAM);
-#endif
 	DBGLOG(INIT, INFO, "Create wireless device success\n");
 	return;
 
@@ -5394,6 +5390,10 @@ static int initWlan(void)
 		kalUninitIOBuffer();
 		return ret;
 	}
+#if CFG_WLAN_ASSISTANT_NVRAM
+	register_file_buf_handler(wlanNvramBufHandler, (void *)NULL,
+			ENUM_BUF_TYPE_NVRAM);
+#endif
 #if (CFG_CHIP_RESET_SUPPORT)
 	glResetInit(prGlueInfo);
 #endif
@@ -5454,6 +5454,9 @@ static void exitWlan(void)
 #endif
 	kalNotifierUnReg();
 	wlanUnregisterNetdevNotifier();
+#if CFG_WLAN_ASSISTANT_NVRAM
+	register_file_buf_handler(NULL, NULL, ENUM_BUF_TYPE_NVRAM);
+#endif
 
 	/* printk("remove %p\n", wlanRemove); */
 #if CFG_CHIP_RESET_SUPPORT
