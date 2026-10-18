@@ -64,6 +64,13 @@ if [[ -z "${VERSION_NAME:-}" ]]; then
             # Manager display tag: legacy line carries the 3.4.2 backports (no upstream v3.4.2-legacy tag yet)
             export KSU_VERSION_TAG_OVERRIDE="v3.4.2-legacy"
             ;;
+        onyx-miui-ksun*|*miui-ksun*)
+            VERSION_NAME="Onyx-KSU-Next-MIUI"
+            BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next MIUI Edition"
+            DEFAULT_DEFCONFIG="begonia_ksu_next_defconfig"
+            # Manager display tag: legacy line carries the 3.4.2 backports (no upstream v3.4.2-legacy tag yet)
+            export KSU_VERSION_TAG_OVERRIDE="v3.4.2-legacy"
+            ;;
         main|granite)
             VERSION_NAME="Granite"
             BRANCH_DESC="Rock-Solid Stability Edition"
