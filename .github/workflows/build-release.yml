@@ -174,6 +174,42 @@ jobs:
             build/Image.gz-dtb
           retention-days: 14
 
+      - name: Mirror to Gofile
+        continue-on-error: true
+        run: |
+          ZIP_FILE="$ZIP_PATH"
+          [[ -f "$ZIP_FILE" ]] || { echo "::warning::No zip to mirror"; exit 0; }
+          LOCAL_MD5="$(md5sum "$ZIP_FILE" | awk '{print $1}')"
+          SERVERS="$(curl -sS https://api.gofile.io/servers | python3 -c "import json,sys;print(' '.join(s['name'] for s in json.load(sys.stdin)['data']['servers']))" || true)"
+          if [[ -z "$SERVERS" ]]; then
+            echo "::warning::Gofile server list unavailable"
+            exit 0
+          fi
+          RESP=""
+          for SERVER in $SERVERS; do
+            echo "Gofile server: $SERVER"
+            RESP="$(curl -sS --max-time 900 -F "file=@${ZIP_FILE}" "https://${SERVER}.gofile.io/contents/uploadfile" || true)"
+            grep -q '"downloadPage"' <<<"$RESP" && break
+            RESP=""
+          done
+          if [[ -z "$RESP" ]]; then
+            echo "::warning::Gofile mirror upload failed"
+            exit 0
+          fi
+          PAGE="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['downloadPage'])" <<<"$RESP")"
+          REMOTE_MD5="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['md5'])" <<<"$RESP")"
+          echo "Gofile mirror page: $PAGE"
+          echo "GOFILE_PAGE=$PAGE" >> $GITHUB_ENV
+          echo "md5 local=$LOCAL_MD5 remote=$REMOTE_MD5"
+          if [[ "$REMOTE_MD5" != "$LOCAL_MD5" ]]; then
+            echo "::warning::Gofile md5 mismatch"
+          fi
+          {
+            echo "### Gofile Mirror"
+            echo ""
+            echo "- **Download page**: $PAGE"
+            echo "- **md5**: \`$LOCAL_MD5\`"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Notify Telegram
         continue-on-error: true
         env:
