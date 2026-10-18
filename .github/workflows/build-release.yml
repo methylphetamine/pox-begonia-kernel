@@ -190,4 +190,75 @@ jobs:
           gh release upload "${{ github.ref_name }}" \
             "${{ env.ZIP_PATH }}" \
             "build/Image.gz-dtb" --clobber
+      - name: Notify Telegram
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN not configured - skipping Telegram notification"
+            exit 0
+          fi
+          API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+          ZIP_FILE="${ZIP_PATH:-}"
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            ZIP_FILE="$(ls -t build/Pox-*.zip 2>/dev/null | head -n 1 || true)"
+          fi
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "::warning::No flashable zip found for Telegram upload"
+            exit 0
+          fi
+          ZIP_BASE="${ZIP_NAME:-$(basename "$ZIP_FILE")}"
+          SHA256="$(sha256sum "$ZIP_FILE" | awk '{print $1}')"
+          SIZE="$(du -h "$ZIP_FILE" | awk '{print $1}')"
+          GOFILE="${GOFILE_PAGE:-unavailable}"
 
+          CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+          if [ -z "$CHAT_ID" ]; then
+            cat > /tmp/tg_chat.py <<'PY'
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          chats = {}
+          for upd in data.get('result', []):
+              msg = upd.get('message') or upd.get('edited_message') or upd.get('channel_post') or upd.get('my_chat_member') or {}
+              chat = msg.get('chat') or {}
+              cid, ctype = chat.get('id'), chat.get('type')
+              if cid is not None:
+                  chats[cid] = ctype
+          groups = [cid for cid, ctype in chats.items() if ctype in ('group', 'supergroup')]
+          if groups:
+              print(groups[-1])
+          elif chats:
+              print(list(chats)[-1])
+          PY
+            CHAT_ID="$(curl -sS --max-time 30 "${API}/getUpdates?limit=100" | python3 /tmp/tg_chat.py || true)"
+          fi
+          if [ -z "$CHAT_ID" ]; then
+            echo "::warning::No Telegram chat found (bot not in a group / no recent updates; pin one with the TELEGRAM_CHAT_ID secret) - skipping"
+            exit 0
+          fi
+
+          MESSAGE="$(printf 'Pox Kernel 1.0.0-Beta [%s]\nBranch: %s\nCommit: %s\nFile: %s (%s)\nSHA256: %s\nGofile: %s\nRun: %s/%s/actions/runs/%s\n' \
+            "${EDITION:-unknown}" "${GITHUB_REF_NAME}" "${COMMIT_SHORT:-unknown}" "$ZIP_BASE" "$SIZE" "$SHA256" "$GOFILE" \
+            "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
+
+          curl -sS --max-time 60 -X POST "${API}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "disable_web_page_preview=true" > /tmp/tg_msg.json || true
+          grep -q '"ok":true' /tmp/tg_msg.json 2>/dev/null || echo "::warning::Telegram sendMessage failed"
+
+          if [ "$(stat -c%s "$ZIP_FILE")" -le 50000000 ]; then
+            curl -sS --max-time 600 \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${ZIP_FILE}" \
+              -F "caption=${ZIP_BASE} | sha256 ${SHA256}" \
+              "${API}/sendDocument" > /tmp/tg_doc.json || true
+            grep -q '"ok":true' /tmp/tg_doc.json 2>/dev/null || echo "::warning::Telegram sendDocument rejected (zip still available via Gofile link)"
+          else
+            echo "::warning::Zip exceeds the Telegram 50 MB document limit - links sent instead"
+          fi
