@@ -284,11 +284,12 @@ jobs:
           else
             echo "::warning::Zip exceeds the Telegram 50 MB document limit - links sent instead"
           fi
-      - name: Upload to Mainline Release (v1.0.0-Beta)
+      - name: Upload to Mainline Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ vars.RELEASE_TAG || 'v1.0.0-Beta' }}
         run: |
-          gh release upload "v1.0.0-Beta" \
+          gh release upload "$RELEASE_TAG" \
             "${{ env.ZIP_PATH }}" \
             --clobber -R "${{ github.repository }}" || true
 
