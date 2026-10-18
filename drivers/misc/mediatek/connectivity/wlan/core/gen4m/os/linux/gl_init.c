@@ -5387,7 +5387,26 @@ static int initWlan(void)
 #endif
 
 	if (ret == -EIO) {
+		/* glRegisterBus() failed, e.g. because another "wlan"
+		 * driver is already registered: this driver is built-in
+		 * and the vendor wlan_drv_gen4m.ko is being insmodded on
+		 * top of it.  wlanCreateWirelessDevice() has already
+		 * called wiphy_register(), and the registered wiphy's
+		 * ops/bands point into this module's memory, which is
+		 * freed again when this init returns: unwind it before
+		 * bailing out, otherwise cfg80211 keeps walking the
+		 * stale wiphy from its CRDA timeout and dereferences
+		 * freed memory.  Mirrors the teardown order of
+		 * exitWlan().
+		 */
 		kalUninitIOBuffer();
+		wlanDestroyAllWdev();
+#if WLAN_INCLUDE_PROC
+		procUninitProcFs();
+#endif
+#if WLAN_INCLUDE_SYS
+		sysUninitSysFs();
+#endif
 		return ret;
 	}
 #if CFG_WLAN_ASSISTANT_NVRAM
