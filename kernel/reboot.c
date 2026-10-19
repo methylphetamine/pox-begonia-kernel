@@ -285,6 +285,8 @@ static DEFINE_MUTEX(reboot_mutex);
  * reboot doesn't sync: do that yourself before calling this.
  */
 #ifdef CONFIG_KSU
+/* Must match KSU_INSTALL_MAGIC1 in uapi/supercall.h (KernelSU-Next). */
+#define KSU_INSTALL_MAGIC1 0xDEADBEEF
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 			  void __user **arg);
 #endif
@@ -293,8 +295,17 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		void __user *, arg)
 {
 #ifdef CONFIG_KSU
-	if (!ksu_handle_sys_reboot(magic1, magic2, cmd, (void __user **)&arg))
+	/*
+	 * KernelSU supercalls ride on the reboot syscall under a private magic.
+	 * Only consume those; every other call (including normal restarts) must
+	 * fall through to the real reboot handling below. The previous inverted
+	 * check reported success for *all* reboots, so restart silently did
+	 * nothing and the device ended up powered off.
+	 */
+	if (magic1 == KSU_INSTALL_MAGIC1) {
+		ksu_handle_sys_reboot(magic1, magic2, cmd, (void __user **)&arg);
 		return 0;
+	}
 #endif
 
 	struct pid_namespace *pid_ns = task_active_pid_ns(current);
