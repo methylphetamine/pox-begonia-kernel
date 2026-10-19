@@ -21,10 +21,20 @@ DEVICE_CODENAME="${DEVICE_CODENAME:-begonia}"
 MAINTAINER="${MAINTAINER:-TXO R (Pox Project)}"
 DEFCONFIG="${DEFCONFIG:-}"
 
-# Bundled root solution: latest FolkPatch (KernelPatch / APatch) package.
-# The FolkPatch GitHub release artifact is an APK that is also a flashable
-# recovery zip (APK renamed to .zip). It is fetched at packaging time and
-# auto-flashed by the AnyKernel3 installer right after the kernel is written.
+# Bundled root solutions: latest APatch and FolkPatch (KernelPatch) packages.
+# Each release artifact is an APK that is also a flashable recovery zip (APK
+# renamed to .zip). Every build produces two flashable kernel zips, one per
+# root package; the AnyKernel3 installer auto-flashes the bundled package
+# right after the kernel is written and stages its manager APK for the
+# first-boot installer.
+BUNDLE_APATCH="${BUNDLE_APATCH:-1}"
+APATCH_REPO="${APATCH_REPO:-bmax121/APatch}"
+APATCH_ZIP_NAME="${APATCH_ZIP_NAME:-apatch.zip}"
+APATCH_PACKAGE="${APATCH_PACKAGE:-me.bmax.apatch}"
+APATCH_INSTALL_APP="${APATCH_INSTALL_APP:-1}"
+APATCH_ASSET=""
+APATCH_ZIP="${APATCH_ZIP:-}"
+
 BUNDLE_FOLKPATCH="${BUNDLE_FOLKPATCH:-1}"
 FOLKPATCH_REPO="${FOLKPATCH_REPO:-LyraVoid/FolkPatch}"
 FOLKPATCH_ZIP_NAME="${FOLKPATCH_ZIP_NAME:-folkpatch.zip}"
@@ -295,15 +305,15 @@ build_kernel() {
     log "Kernel image saved to: $BUILD_DIR/Image.gz-dtb"
 }
 
-# Fetch the latest FolkPatch release artifact (an APK that doubles as a
+# Fetch the latest root-solution release artifact (an APK that doubles as a
 # flashable recovery zip) and stage it under the given path as a .zip.
-fetch_folkpatch() {
-    local dest="$1"
-    local api="https://api.github.com/repos/${FOLKPATCH_REPO}/releases/latest"
-    local url=""
+fetch_root_release() {
+    local repo="$1" dest="$2" label="$3" asset_var="$4"
+    local api="https://api.github.com/repos/${repo}/releases/latest"
+    local url="" asset_name=""
 
     if ! command -v curl >/dev/null 2>&1; then
-        warn "curl not available; cannot fetch FolkPatch release."
+        warn "curl not available; cannot fetch ${label} release."
         return 1
     fi
 
@@ -313,24 +323,83 @@ fetch_folkpatch() {
         | sed -E 's/.*"(https[^"]+)".*/\1/')"
 
     if [[ -z "$url" ]]; then
-        warn "Could not resolve a FolkPatch APK from ${FOLKPATCH_REPO}."
+        warn "Could not resolve a ${label} APK from ${repo}."
         return 1
     fi
 
-    FOLKPATCH_ASSET="$(basename "$url")"
-    log "Fetching latest FolkPatch release: $FOLKPATCH_ASSET"
+    asset_name="$(basename "$url")"
+    printf -v "$asset_var" '%s' "$asset_name"
+    log "Fetching latest ${label} release: $asset_name"
     if ! curl -fL --retry 3 --connect-timeout 20 -o "$dest" "$url"; then
-        warn "Failed to download FolkPatch APK."
+        warn "Failed to download ${label} APK."
         return 1
     fi
     return 0
 }
 
+fetch_apatch() {
+    fetch_root_release "$APATCH_REPO" "$1" "APatch" "APATCH_ASSET"
+}
+
+fetch_folkpatch() {
+    fetch_root_release "$FOLKPATCH_REPO" "$1" "FolkPatch" "FOLKPATCH_ASSET"
+}
+
+# Package both root variants. APatch first, FolkPatch second, so the
+# FolkPatch zip stays the primary artifact (latest.zip) for compatibility.
 package_zip() {
     if [[ "${SKIP_PACKAGE:-0}" == "1" ]]; then
         log "Skipping zip packaging."
         return
     fi
+    if [[ ! -f "$BUILD_DIR/Image.gz-dtb" && ! -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]]; then
+        err "Cannot package zip: $BUILD_DIR/Image.gz-dtb does not exist. Run build first."
+        exit 1
+    fi
+    package_zip_variant APatch
+    package_zip_variant FolkPatch
+}
+
+# Package one AnyKernel3 zip for a root variant ("APatch" or "FolkPatch").
+# Each zip carries exactly one bundled root package, auto-flashes it right
+# after the kernel is written, and stages its manager APK for first-boot
+# install of the matching manager app.
+package_zip_variant() {
+    local variant="$1"
+    local root_name root_label root_zip_name root_package root_install_app
+    local root_apk_name root_env_prefix asset_var fetch_fn bundle_var bundle
+    local root_source root_asset
+
+    case "$variant" in
+        APatch)
+            root_name="APatch"
+            root_label="APatch (KernelPatch)"
+            root_zip_name="$APATCH_ZIP_NAME"
+            root_package="$APATCH_PACKAGE"
+            root_install_app="$APATCH_INSTALL_APP"
+            root_apk_name="APatch.apk"
+            root_env_prefix="APATCH"
+            root_source="$APATCH_ZIP"
+            ;;
+        FolkPatch)
+            root_name="FolkPatch"
+            root_label="FolkPatch (KernelPatch)"
+            root_zip_name="$FOLKPATCH_ZIP_NAME"
+            root_package="$FOLKPATCH_PACKAGE"
+            root_install_app="$FOLKPATCH_INSTALL_APP"
+            root_apk_name="FolkPatch.apk"
+            root_env_prefix="FOLKPATCH"
+            root_source="$FOLKPATCH_ZIP"
+            ;;
+        *)
+            err "Unknown root variant: $variant"
+            exit 1
+            ;;
+    esac
+    asset_var="${root_env_prefix}_ASSET"
+    fetch_fn="fetch_$(echo "$variant" | tr '[:upper:]' '[:lower:]')"
+    bundle_var="BUNDLE_${root_env_prefix}"
+    bundle="${!bundle_var:-1}"
 
     local image="$BUILD_DIR/Image.gz-dtb"
     if [[ ! -f "$image" ]]; then
@@ -348,22 +417,24 @@ package_zip() {
     cp -r "$AK3_DIR/." "$stage/"
     cp "$image" "$stage/Image.gz-dtb"
 
-    # Bundle the latest FolkPatch (KernelPatch) package for auto-flash.
-    # The release APK is a flashable zip; it is staged with a .zip suffix.
-    local fp_zip="$stage/${FOLKPATCH_ZIP_NAME}"
-    if [[ "${BUNDLE_FOLKPATCH}" == "1" ]]; then
-        if [[ -n "$FOLKPATCH_ZIP" && -f "$FOLKPATCH_ZIP" ]]; then
-            cp -f "$FOLKPATCH_ZIP" "$fp_zip"
-            FOLKPATCH_ASSET="$(basename "$FOLKPATCH_ZIP")"
-            log "Bundled local FolkPatch package: $FOLKPATCH_ASSET"
-        elif fetch_folkpatch "$fp_zip"; then
-            log "Bundled FolkPatch package as ${FOLKPATCH_ZIP_NAME} ($(du -h "$fp_zip" | cut -f1))"
+    # Bundle the latest root package for auto-flash. The release APK is a
+    # flashable zip; it is staged with a .zip suffix.
+    local root_zip="$stage/${root_zip_name}"
+    root_asset=""
+    if [[ "$bundle" == "1" ]]; then
+        if [[ -n "$root_source" && -f "$root_source" ]]; then
+            cp -f "$root_source" "$root_zip"
+            root_asset="$(basename "$root_source")"
+            log "Bundled local ${root_label} package: $root_asset"
+        elif "$fetch_fn" "$root_zip"; then
+            root_asset="${!asset_var}"
+            log "Bundled ${root_label} package as ${root_zip_name} ($(du -h "$root_zip" | cut -f1))"
         else
-            rm -f "$fp_zip"
-            warn "Proceeding without FolkPatch auto-flash step."
+            rm -f "$root_zip"
+            warn "Proceeding without ${root_label} auto-flash step."
         fi
     else
-        log "FolkPatch bundling disabled (BUNDLE_FOLKPATCH=0)."
+        log "${root_label} bundling disabled (${bundle_var}=0)."
     fi
 
     local commit_hash commit_date commit_subject kver toolchain_ver git_branch
@@ -403,7 +474,7 @@ package_zip() {
         echo " Linux: v$kver | Date: $COMMIT_DATE"
         echo " Toolchain: $toolchain_ver"
         echo " Defconfig: $DEFCONFIG (APatch ready)"
-        echo " Root Auto-Flash: FolkPatch (KernelPatch) ${FOLKPATCH_ASSET:-disabled}"
+        echo " Root Auto-Flash: ${root_label} ${root_asset:-disabled}"
         echo " Memory: iOS-Style On-Demand Multi-Stream Compressed ZRAM"
         echo " Gaming: Zero Frame-Drop Gaming Mode Controller"
         echo "========================================================"
@@ -813,13 +884,17 @@ on boot
 RC_EOF
     chmod 644 \$RAMDISK/init.battery_guard.rc
 
-    # 4. One-shot first-boot installer for the bundled FolkPatch manager app
-    if [ -f "\$AKHOME/pox_folkpatch_install.sh" ]; then
-        cp -f "\$AKHOME/pox_folkpatch_install.sh" "\$RAMDISK/pox_folkpatch_install.sh";
-        chmod 755 "\$RAMDISK/pox_folkpatch_install.sh";
-        cat << 'RC_EOF' > \$RAMDISK/init.pox_folkpatch.rc
-# Pox Kernel - one-shot FolkPatch manager app installer
-service pox_folkpatch_install /system/bin/sh /pox_folkpatch_install.sh
+    # 4. One-shot first-boot installer for the bundled root manager app.
+    # A single pox_root_* pipeline serves both variants; stale FolkPatch-era
+    # files/imports from earlier flashes are migrated away first.
+    rm -f "\$RAMDISK/pox_folkpatch_install.sh";
+    rm -f "\$RAMDISK/init.pox_folkpatch.rc";
+    if [ -f "\$AKHOME/pox_root_install.sh" ]; then
+        cp -f "\$AKHOME/pox_root_install.sh" "\$RAMDISK/pox_root_install.sh";
+        chmod 755 "\$RAMDISK/pox_root_install.sh";
+        cat << 'RC_EOF' > \$RAMDISK/init.pox_root.rc
+# Pox Kernel - one-shot root manager app installer
+service pox_root_install /system/bin/sh /pox_root_install.sh
     class late_start
     user root
     group root
@@ -828,16 +903,18 @@ service pox_folkpatch_install /system/bin/sh /pox_folkpatch_install.sh
     disabled
 
 on property:sys.boot_completed=1
-    start pox_folkpatch_install
+    start pox_root_install
 RC_EOF
-        chmod 644 \$RAMDISK/init.pox_folkpatch.rc;
+        chmod 644 \$RAMDISK/init.pox_root.rc;
     fi
 
     if [ -f "\$RAMDISK/init.rc" ]; then
         insert_line init.rc "init.memory_enhanced.rc" after "import /init.environ.rc" "import /init.memory_enhanced.rc";
         insert_line init.rc "init.gaming.rc" after "import /init.memory_enhanced.rc" "import /init.gaming.rc";
         insert_line init.rc "init.battery_guard.rc" after "import /init.gaming.rc" "import /init.battery_guard.rc";
-        [ -f "\$RAMDISK/init.pox_folkpatch.rc" ] && insert_line init.rc "init.pox_folkpatch.rc" after "import /init.battery_guard.rc" "import /init.pox_folkpatch.rc";
+        ## Migrate the stale FolkPatch-era import out of earlier flashes
+        remove_line init.rc "import /init.pox_folkpatch.rc";
+        [ -f "\$RAMDISK/init.pox_root.rc" ] && insert_line init.rc "init.pox_root.rc" after "import /init.battery_guard.rc" "import /init.pox_root.rc";
     fi
 fi
 
@@ -870,43 +947,53 @@ ui_print "     - FPSGO Ultra-Rescue + Mali-G76 MC4 Touch Boost: enabled";
 ui_print "     - Universal USB OTG: DACs, controllers, serial & ethernet active";
 write_boot;
 
-## Auto-flash bundled FolkPatch (KernelPatch / APatch) package after kernel
-## The FolkPatch release APK is itself a flashable recovery zip. Mirror its
-## update-binary flow: stage assets/lib and run its installer against the
-## freshly written boot image so the kernel gets KernelPatch embedded.
-FP_SRC="";
-for fp in "\$AKHOME/${FOLKPATCH_ZIP_NAME}" "${FOLKPATCH_ZIP_NAME}"; do
-    [ -f "\$fp" ] && { FP_SRC="\$fp"; break; };
+## Auto-flash bundled ${root_label} package after the kernel is written.
+## The release APK is itself a flashable recovery zip (KernelPatch). Mirror
+## its own update-binary flow: extract its bundled busybox and assets, then
+## run the root installer against the freshly written boot image.
+ROOT_SRC="";
+for root_pkg in "\$AKHOME/${root_zip_name}" "${root_zip_name}"; do
+    [ -f "\$root_pkg" ] && { ROOT_SRC="\$root_pkg"; break; };
 done;
-if [ -n "\$FP_SRC" ]; then
+if [ -n "\$ROOT_SRC" ]; then
     ui_print " ";
     ui_print " ============================================";
-    ui_print "   Flashing bundled FolkPatch (KernelPatch)   ";
+    ui_print "   Flashing bundled ${root_label}   ";
     ui_print " ============================================";
     sync;
-    FP_INSTALL=/dev/tmp/install;
-    rm -rf "\$FP_INSTALL";
-    mkdir -p "\$FP_INSTALL";
-    unzip -o "\$FP_SRC" "assets/*" "lib/*" -d "\$FP_INSTALL" >/dev/null 2>&1;
-    if [ -f "\$FP_INSTALL/assets/InstallAP.sh" ]; then
-        chmod -R 755 "\$FP_INSTALL/assets" "\$FP_INSTALL/lib" 2>/dev/null;
-        ( cd "\$FP_INSTALL" && sh assets/InstallAP.sh 3 "\$OUTFD" "\$FP_SRC" );
-        ui_print " [*] FolkPatch (KernelPatch) install step complete.";
-    else
-        ui_print " [!] FolkPatch installer not found; skipping root step.";
+    ROOT_INSTALL=/dev/tmp/install;
+    rm -rf "\$ROOT_INSTALL";
+    mkdir -p "\$ROOT_INSTALL";
+    ROOT_BB=/dev/tmp/pox_busybox;
+    if unzip -o "\$ROOT_SRC" "lib/arm64-v8a/libbusybox.so" -d /dev/tmp >/dev/null 2>&1; then
+        mv -f /dev/tmp/lib/arm64-v8a/libbusybox.so "\$ROOT_BB" 2>/dev/null;
+        chmod 755 "\$ROOT_BB" 2>/dev/null;
+        rm -rf /dev/tmp/lib;
     fi;
-    if [ "${FOLKPATCH_INSTALL_APP}" = "1" ]; then
+    unzip -o "\$ROOT_SRC" "assets/*" "lib/*" -x "lib/*/libbusybox.so" -d "\$ROOT_INSTALL" >/dev/null 2>&1;
+    if [ -f "\$ROOT_INSTALL/assets/InstallAP.sh" ]; then
+        chmod -R 755 "\$ROOT_INSTALL/assets" "\$ROOT_INSTALL/lib" 2>/dev/null;
+        if [ -x "\$ROOT_BB" ]; then
+            ( cd "\$ROOT_INSTALL" && ASH_STANDALONE=1 "\$ROOT_BB" sh assets/InstallAP.sh 3 "\$OUTFD" "\$ROOT_SRC" );
+        else
+            ( cd "\$ROOT_INSTALL" && sh assets/InstallAP.sh 3 "\$OUTFD" "\$ROOT_SRC" );
+        fi;
+        ui_print " [*] ${root_label} install step complete.";
+    else
+        ui_print " [!] ${root_label} installer not found; skipping root step.";
+    fi;
+    if [ "${root_install_app}" = "1" ]; then
         ## Stage the manager APK (the bundle *is* the APK) for first-boot install.
         for dest in /data/system /data/local/tmp /sdcard; do
             [ -d "\$dest" ] || continue;
-            if cp -f "\$FP_SRC" "\$dest/FolkPatch.apk" 2>/dev/null; then
-                chmod 0644 "\$dest/FolkPatch.apk" 2>/dev/null;
+            if cp -f "\$ROOT_SRC" "\$dest/${root_apk_name}" 2>/dev/null; then
+                chmod 0644 "\$dest/${root_apk_name}" 2>/dev/null;
             fi;
         done;
-        ui_print " [*] Staged FolkPatch manager APK for first-boot install.";
+        ui_print " [*] Staged ${root_name} manager APK for first-boot install.";
     fi;
 else
-    ui_print " [i] No bundled FolkPatch package; skipping root step.";
+    ui_print " [i] No bundled ${root_name} package; skipping root step.";
 fi;
 ui_print " ";
 
@@ -922,20 +1009,20 @@ ui_print " ";
 ## end install
 AK_EOF
 
-    # Standalone first-boot installer for the bundled FolkPatch manager app.
-    # anykernel.sh copies this into the boot ramdisk; init.pox_folkpatch.rc
-    # runs it once after sys.boot_completed to install the manager as a user app.
-    if [[ "$BUNDLE_FOLKPATCH" == "1" && "$FOLKPATCH_INSTALL_APP" == "1" ]]; then
-        cat << 'FP_SH_EOF' > "$stage/pox_folkpatch_install.sh"
+    # Standalone first-boot installer for the bundled root manager app.
+    # anykernel.sh copies this into the boot ramdisk; init.pox_root.rc runs
+    # it once after sys.boot_completed to install the manager as a user app.
+    if [[ "$bundle" == "1" && "$root_install_app" == "1" ]]; then
+        cat << 'FP_SH_EOF' > "$stage/pox_root_install.sh"
 #!/system/bin/sh
-# Pox Kernel - install the bundled FolkPatch manager app (first boot, once).
-PKG=@FOLKPATCH_PACKAGE@
-LOG=/data/local/tmp/pox_folkpatch_install.log
+# Pox Kernel - install the bundled root manager app (first boot, once).
+PKG=@ROOT_PACKAGE@
+LOG=/data/local/tmp/pox_root_install.log
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null; }
 
 APK=""
-for c in /data/system/FolkPatch.apk /data/local/tmp/FolkPatch.apk /sdcard/FolkPatch.apk; do
+for c in /data/system/@ROOT_APK@ /data/local/tmp/@ROOT_APK@ /sdcard/@ROOT_APK@; do
     [ -f "$c" ] && { APK="$c"; break; }
 done
 [ -n "$APK" ] || exit 0
@@ -963,27 +1050,31 @@ fi
 log "install result ok=$ok pkg=$PKG apk=$APK"
 exit 0
 FP_SH_EOF
-        sed -i "s/@FOLKPATCH_PACKAGE@/${FOLKPATCH_PACKAGE}/g" "$stage/pox_folkpatch_install.sh"
-        chmod 755 "$stage/pox_folkpatch_install.sh"
+        sed -i "s/@ROOT_PACKAGE@/${root_package}/g; s/@ROOT_APK@/${root_apk_name}/g" "$stage/pox_root_install.sh"
+        chmod 755 "$stage/pox_root_install.sh"
     fi
 
-    local zip_file="$BUILD_DIR/${ZIP_BASE}.zip"
-    log "Packaging AnyKernel3 flashable zip: $zip_file"
+    local zip_file="$BUILD_DIR/${ZIP_BASE}-${variant}.zip"
+    log "Packaging AnyKernel3 ${variant} flashable zip: $zip_file"
     (cd "$stage" && zip -r9 "$zip_file" . -x '*.git*' -x '.github*')
     rm -rf "$stage"
 
-    # Also maintain latest.zip, versioned zip, and date-stamped copies in build/
-    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DATE}.zip"
-    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}.zip"
-    ln -sf "$(basename "$zip_file")" "$BUILD_DIR/latest.zip"
-    ln -sf "$(basename "$zip_file")" "$BUILD_DIR/${COMMIT_HASH}.zip"
+    # Also maintain variant symlinks and a date-stamped copy. The unsuffixed
+    # latest.zip / commit links stay on the FolkPatch variant (primary).
+    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${variant}-${DATE}.zip"
+    ln -sf "$(basename "$zip_file")" "$BUILD_DIR/latest-${variant}.zip"
+    ln -sf "$(basename "$zip_file")" "$BUILD_DIR/${COMMIT_HASH}-${variant}.zip"
+    ln -sf "$(basename "$zip_file")" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}-${variant}.zip"
+    if [[ "$variant" == "FolkPatch" ]]; then
+        ln -sf "$(basename "$zip_file")" "$BUILD_DIR/latest.zip"
+        ln -sf "$(basename "$zip_file")" "$BUILD_DIR/${COMMIT_HASH}.zip"
+    fi
 
     log "================================================="
-    log "BUILD SUCCEEDED!"
+    log "BUILD SUCCEEDED (${variant} variant)!"
     log "Package ZIP:   $zip_file"
-    log "Commit Link:   $BUILD_DIR/${COMMIT_HASH}.zip"
-    log "Latest Link:   $BUILD_DIR/latest.zip"
-    log "Device Link:   $BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}.zip"
+    log "Variant Link:  $BUILD_DIR/latest-${variant}.zip"
+    log "Commit Link:   $BUILD_DIR/${COMMIT_HASH}-${variant}.zip"
     log "Kernel Image:  $BUILD_DIR/Image.gz-dtb"
     log "================================================="
 }
@@ -1013,14 +1104,30 @@ install_device() {
         exit 1
     fi
 
-    log "Pushing $(basename "$zip_file") to device (/sdcard/)..."
-    adb push "$zip_file" "/sdcard/$(basename "$zip_file")"
-    adb push "$zip_file" "/sdcard/latest.zip"
-    adb push "$zip_file" "/sdcard/Pox-Kernel-latest.zip"
+    # Push every variant zip, plus the FolkPatch one under the stable names.
+    local pushed_variant variant_zip
+    pushed_variant=""
+    for variant_zip in "$BUILD_DIR/${ZIP_BASE}-APatch.zip" "$BUILD_DIR/${ZIP_BASE}-FolkPatch.zip"; do
+        [[ -f "$variant_zip" ]] || continue;
+        log "Pushing $(basename "$variant_zip") to device (/sdcard/)..."
+        adb push "$variant_zip" "/sdcard/$(basename "$variant_zip")"
+        if [[ "$variant_zip" == *-FolkPatch.zip ]]; then
+            adb push "$variant_zip" "/sdcard/latest.zip"
+            adb push "$variant_zip" "/sdcard/Pox-Kernel-latest.zip"
+            pushed_variant="$variant_zip"
+        fi
+    done
+    if [[ -z "$pushed_variant" ]]; then
+        log "Pushing $(basename "$zip_file") to device (/sdcard/)..."
+        adb push "$zip_file" "/sdcard/$(basename "$zip_file")"
+        adb push "$zip_file" "/sdcard/latest.zip"
+        adb push "$zip_file" "/sdcard/Pox-Kernel-latest.zip"
+    fi
 
-    log "Kernel zip installed to /sdcard/ on device!"
-    log "  - /sdcard/$(basename "$zip_file")"
-    log "  - /sdcard/latest.zip"
+    log "Kernel zip(s) installed to /sdcard/ on device!"
+    log "  - /sdcard/${ZIP_BASE}-APatch.zip (APatch auto-flash)"
+    log "  - /sdcard/${ZIP_BASE}-FolkPatch.zip (FolkPatch auto-flash)"
+    log "  - /sdcard/latest.zip (FolkPatch primary)"
     log "  - /sdcard/Pox-Kernel-latest.zip"
 }
 
