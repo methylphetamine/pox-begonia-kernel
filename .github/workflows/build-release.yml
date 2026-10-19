@@ -286,13 +286,21 @@ jobs:
               --data-urlencode "disable_web_page_preview=true" > /tmp/tg_msg.json || true
             grep -q '"ok":true' /tmp/tg_msg.json 2>/dev/null || echo "::warning::Telegram sendMessage failed"
           fi
-      - name: Upload to Mainline Release (v1.0.0-Beta)
+      - name: Upload to Mainline Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ vars.RELEASE_TAG || 'v1.0.0-Beta' }}
         run: |
-          gh release upload "v1.0.0-Beta" \
-            "${{ env.ZIP_PATH }}" \
-            --clobber -R "${{ github.repository }}" || true
+          echo "[*] Target release: $RELEASE_TAG"
+          set +e
+          OUT=$(gh release upload "$RELEASE_TAG" "${{ env.ZIP_PATH }}" --clobber -R "${{ github.repository }}" 2>&1)
+          RC=$?
+          set -e
+          if [ "$RC" -ne 0 ]; then
+            echo "::warning::Release upload to '$RELEASE_TAG' failed: $OUT"
+          else
+            echo "[*] Uploaded $(basename "${{ env.ZIP_PATH }}") to release $RELEASE_TAG"
+          fi
 
       - name: Publish Tagged Release
         if: startsWith(github.ref, 'refs/tags/v')
