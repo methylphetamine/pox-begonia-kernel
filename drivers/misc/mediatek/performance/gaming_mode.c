@@ -388,19 +388,11 @@ int gaming_mode_set(int mode)
 			set_capacity_margin(1126);
 		}
 
-		/* Auto-disarm dynamic fsync on powersave to guarantee database durability */
-		if (pox_dynamic_fsync_get())
-			pox_dynamic_fsync_set(0);
-
 		/* 10. Adaptive memory powersave: less compression CPU, drop caches */
 		pox_memory_preset(mode);
 
 		pr_info("Ultra Power Saver Profile engaged: Maximum battery preservation.\n");
 	} else {
-		/* Auto-disarm dynamic fsync on exit from gaming mode */
-		if (pox_dynamic_fsync_get())
-			pox_dynamic_fsync_set(0);
-
 		pr_info("Deactivating Gaming Mode: Restoring Balanced Profile...\n");
 
 		/* 1. Restore FPSGO Defaults */
