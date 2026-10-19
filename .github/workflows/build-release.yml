@@ -232,19 +232,27 @@ jobs:
             "${EDITION:-unknown}" "${GITHUB_REF_NAME}" "${COMMIT_SHORT:-unknown}" "$ZIP_BASE" "$SIZE" "$SHA256" "$GOFILE" \
             "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
 
-          curl -sS --max-time 60 -X POST "${API}/sendMessage" \
-            --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "text=${MESSAGE}" \
-            --data-urlencode "disable_web_page_preview=true" > /tmp/tg_msg.json || true
-          grep -q '"ok":true' /tmp/tg_msg.json 2>/dev/null || echo "::warning::Telegram sendMessage failed"
-
+          # One message per build: upload the zip with the summary as its
+          # caption. Telegram caps captions at 1024 chars (this summary is far
+          # shorter) and zip documents at 50 MB, so an oversize zip or a
+          # rejected upload falls back to a text-only message carrying the
+          # same information instead of a second message.
+          SENT=0
           if [ "$(stat -c%s "$ZIP_FILE")" -le 50000000 ]; then
             curl -sS --max-time 600 \
               -F "chat_id=${CHAT_ID}" \
               -F "document=@${ZIP_FILE}" \
-              -F "caption=${ZIP_BASE} | sha256 ${SHA256}" \
+              -F "caption=${MESSAGE}" \
               "${API}/sendDocument" > /tmp/tg_doc.json || true
-            grep -q '"ok":true' /tmp/tg_doc.json 2>/dev/null || echo "::warning::Telegram sendDocument rejected (zip still available via Gofile link)"
+            grep -q '"ok":true' /tmp/tg_doc.json 2>/dev/null && SENT=1
           else
-            echo "::warning::Zip exceeds the Telegram 50 MB document limit - links sent instead"
+            echo "::warning::Zip exceeds the Telegram 50 MB document limit - sending links only"
+          fi
+
+          if [ "$SENT" -ne 1 ]; then
+            curl -sS --max-time 60 -X POST "${API}/sendMessage" \
+              --data-urlencode "chat_id=${CHAT_ID}" \
+              --data-urlencode "text=${MESSAGE}" \
+              --data-urlencode "disable_web_page_preview=true" > /tmp/tg_msg.json || true
+            grep -q '"ok":true' /tmp/tg_msg.json 2>/dev/null || echo "::warning::Telegram sendMessage failed"
           fi
