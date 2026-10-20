@@ -18,8 +18,12 @@ KERNEL_NAME="${KERNEL_NAME:-Pox}"
 KERNEL_VERSION="${KERNEL_VERSION:-1.0.0-Beta}"
 DEVICE_NAME="${DEVICE_NAME:-Redmi Note 8 Pro}"
 DEVICE_CODENAME="${DEVICE_CODENAME:-begonia}"
-MAINTAINER="${MAINTAINER:-TXO R (Pox Project)}"
+MAINTAINER="${MAINTAINER:-Pox}"
 DEFCONFIG="${DEFCONFIG:-}"
+
+log()  { printf '\033[1;32m[*] %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
+err()  { printf '\033[1;31m[-] %s\033[0m\n' "$*"; }
 
 # Determine safe parallel jobs based on available RAM and load to protect host PC from freezing
 auto_jobs() {
@@ -40,70 +44,121 @@ DATE="$(date +%Y%m%d-%H%M)"
 
 # Git Metadata: Branch & Commit ID
 GIT_BRANCH="${GIT_BRANCH:-${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "onyx")}}"
+GIT_BRANCH="${GIT_BRANCH#refs/heads/}"
+GIT_BRANCH="${GIT_BRANCH#refs/tags/}"
 COMMIT_HASH="${COMMIT_HASH:-$(git rev-parse --short=7 HEAD 2>/dev/null || echo "custom")}"
 COMMIT_DATE="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || date +'%Y-%m-%d %H:%M')"
 COMMIT_SUBJECT="$(git log -1 --format=%s 2>/dev/null || echo "Release build")"
 
 # Version Name / Codename (Rocks theme: Granite, Obsidian, Onyx)
-if [[ -z "${VERSION_NAME:-}" ]]; then
-    case "$GIT_BRANCH" in
-        onyx-resukisu*|*resukisu*)
-            VERSION_NAME="Onyx-ReSukiSu"
-            BRANCH_DESC="Zero Frame-Drop Gaming & ReSukiSu Ultra Edition"
-            DEFAULT_DEFCONFIG="begonia_user_ksu_defconfig"
-            ;;
-        onyx-apatch*|*apatch*)
-            VERSION_NAME="Onyx-APatch"
-            BRANCH_DESC="Zero Frame-Drop Gaming & APatch Edition"
-            DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
-            ;;
-        onyx-ksu-next*|*ksu-next*)
-            VERSION_NAME="Onyx-KSU-Next"
-            BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
-            DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
-            ;;
-        main|granite)
-            VERSION_NAME="Granite"
-            BRANCH_DESC="Rock-Solid Stability Edition"
-            DEFAULT_DEFCONFIG="begonia_user_defconfig"
-            ;;
-        memory-enhanced|obsidian)
-            VERSION_NAME="Obsidian"
-            BRANCH_DESC="iOS-Style Compressed Memory Edition"
-            DEFAULT_DEFCONFIG="begonia_user_defconfig"
-            ;;
-        gaming|onyx|*)
-            VERSION_NAME="Onyx"
-            BRANCH_DESC="Zero Frame-Drop Gaming Edition (Unrooted)"
-            DEFAULT_DEFCONFIG="begonia_user_defconfig"
-            ;;
+#
+# One resolver maps every branch/tag name used by this repository, including the
+# consolidated `feature/*` branches and the `release/<edition>-<date>` tags, to
+# an edition name, a human description, and the default defconfig. Root flavors
+# (KSU-Next/BakaSU/ReSukiSU/APatch) and media overlays (C2, MIUI) are composed so
+# combined tags such as `release/onyx-c2-ksu-next-2026-10-20` report the full
+# edition instead of silently falling back to the generic Onyx build.
+resolve_variant() {
+    local branch="$1"
+    local root="" root_desc="" defconfig="begonia_user_defconfig"
+    local extra_desc=""
+
+    # Root flavor. Order matters: `sultan` is matched before the generic APatch
+    # pattern so the Sultan debloat label wins.
+    case "$branch" in
+        *resukisu*)                   root="ReSukiSU"; root_desc="ReSukiSU Root";        defconfig="resukisu_defconfig" ;;
+        *bakasu*)                     root="BakaSU";   root_desc="BakaSU Root";          defconfig="bakasu_defconfig" ;;
+        *ksun*|*ksu-next*|*kernelsu*) root="KSU-Next"; root_desc="KernelSU-Next";        defconfig="begonia_ksu_next_defconfig" ;;
+        *sultan*)                     root="Sultan-APatch"; root_desc="Sultan Debloat APatch"; defconfig="begonia_apatch_defconfig" ;;
+        *apatch*|*folkpatch*)         root="APatch";   root_desc="APatch";               defconfig="begonia_apatch_defconfig" ;;
+        *kaeru*)                      root="Kaeru";    root_desc="Kaeru Bootloader";     defconfig="begonia_user_defconfig" ;;
     esac
+
+    # Orthogonal media overlays.
+    if [[ "$branch" == *miui* || "$branch" == *hyperos* ]]; then
+        extra_desc="${extra_desc:+$extra_desc + }MIUI/HyperOS"
+    fi
+    if [[ "$branch" == *c2* || "$branch" == *codec2* ]]; then
+        extra_desc="${extra_desc:+$extra_desc + }Codec2 Media"
+    fi
+
+    DEFAULT_DEFCONFIG="$defconfig"
+
+    if [[ "$branch" == main || "$branch" == *granite* ]]; then
+        VERSION_NAME="Granite"
+        BRANCH_DESC="Rock-Solid Stability Edition"
+        DEFAULT_DEFCONFIG="begonia_user_defconfig"
+        return
+    fi
+
+    if [[ "$branch" == *obsidian* || "$branch" == *memory-enhanced* ]]; then
+        VERSION_NAME="Obsidian"
+        BRANCH_DESC="iOS-Style Compressed Memory Edition"
+        DEFAULT_DEFCONFIG="begonia_user_defconfig"
+        return
+    fi
+
+    local edition="Onyx"
+    [[ "$branch" == *c2* || "$branch" == *codec2* ]] && edition="${edition}-C2"
+    [[ "$branch" == *miui* || "$branch" == *hyperos* ]] && edition="${edition}-MIUI"
+
+    BRANCH_DESC="Zero Frame-Drop Gaming"
+    [[ -n "$extra_desc" ]] && BRANCH_DESC="$BRANCH_DESC & $extra_desc"
+
+    if [[ -n "$root" ]]; then
+        VERSION_NAME="${edition}-${root}"
+        BRANCH_DESC="$BRANCH_DESC & $root_desc Edition"
+    else
+        VERSION_NAME="$edition"
+        BRANCH_DESC="$BRANCH_DESC Edition (Unrooted)"
+    fi
+}
+
+if [[ -z "${VERSION_NAME:-}" ]]; then
+    resolve_variant "$GIT_BRANCH"
 else
     BRANCH_DESC="${BRANCH_DESC:-Custom Edition}"
     DEFAULT_DEFCONFIG="begonia_user_defconfig"
 fi
+
+# If the branch name asked for a feature defconfig that does not exist in this
+# checkout (for example `GIT_BRANCH=feature/ksun` on top of common/base), fall
+# back to the unrooted default so `./build.sh all` still works instead of dying
+# in the kconfig step.
+if [[ -z "${DEFCONFIG:-}" && ! -f "$ROOT_DIR/arch/arm64/configs/${DEFAULT_DEFCONFIG}" ]]; then
+    warn "Defconfig ${DEFAULT_DEFCONFIG} is not present in this checkout; falling back to begonia_user_defconfig"
+    DEFAULT_DEFCONFIG="begonia_user_defconfig"
+fi
+
 DEFCONFIG="${DEFCONFIG:-$DEFAULT_DEFCONFIG}"
 BRANCH_CODENAME="$VERSION_NAME"
 
-# Derive dynamic localversion string: name, version, edition, commit id
+# Kernel release strings.
+#   CUSTOM_LOCALVERSION   -> CONFIG_LOCALVERSION, i.e. what `uname -r` shows.
+#                            Unextended: 4.14.357-Pox
+#   EXTENDED_LOCALVERSION -> full edition-qualified identity, shown in the
+#                            build log, changelog, installer banner, metadata.
+#                            Extended:   4.14.357-Pox-1.0.0-Beta-Onyx-KSU-Next
+# The commit id is excluded from both so kernel identity stays stable; it stays
+# in the build metadata, the changelog, and the <commit>.zip link.
 if [[ -n "${LOCALVERSION:-}" ]]; then
     CUSTOM_LOCALVERSION="$LOCALVERSION"
 else
-    CUSTOM_LOCALVERSION="-${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${COMMIT_HASH}"
+    CUSTOM_LOCALVERSION="-${KERNEL_NAME}"
 fi
+EXTENDED_LOCALVERSION="${EXTENDED_LOCALVERSION:--${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}}"
 
-# Package zip base name: name, version, edition, commit id, device
+# Base Linux version from the top-level Makefile (e.g. 4.14.357).
+LINUX_VERSION="4.14.$(grep -m1 '^SUBLEVEL =' "$ROOT_DIR/Makefile" | awk '{print $3}')"
+
+# Package zip base name: name, version, edition, device
 if [[ -n "${PACKAGE_NAME:-}" ]]; then
     ZIP_BASE="$PACKAGE_NAME"
 elif [[ "$KERNEL_NAME" == *"$DEVICE_CODENAME"* ]]; then
-    ZIP_BASE="${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${COMMIT_HASH}"
+    ZIP_BASE="${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}"
 else
-    ZIP_BASE="${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${COMMIT_HASH}-${DEVICE_CODENAME}"
+    ZIP_BASE="${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}"
 fi
-
-log()  { printf '\033[1;32m[*] %s\033[0m\n' "$*"; }
-warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
-err()  { printf '\033[1;31m[-] %s\033[0m\n' "$*"; }
 
 # 1. Ensure kerdevdep is bootstrapped
 if [[ ! -f "$KERDEVDEP/env.sh" || ! -x "$KERDEVDEP/clang/bin/clang" || ! -x "$KERDEVDEP/bin/ccache" ]]; then
@@ -121,8 +176,9 @@ CLANG_TRIPLE=aarch64-linux-gnu-
 CROSS_COMPILE=aarch64-linux-gnu-
 AK3_DIR="$KERDEVDEP/anykernel"
 
-export KBUILD_BUILD_USER="${KBUILD_BUILD_USER:-TXO_R}"
-export KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-${KERNEL_NAME}Kernel}"
+# Builder identity shown in the kernel banner: Linux version ... (POX@poxproject)
+export KBUILD_BUILD_USER="POX"
+export KBUILD_BUILD_HOST="poxproject"
 
 ACTION="${1:-all}"
 
@@ -170,9 +226,12 @@ prepare_config() {
         ./scripts/config --file "$OUT_DIR/.config" --disable INLINE_OPTIMIZATION
     fi
 
-    # Dynamically apply LOCALVERSION based on KERNEL_NAME and KERNEL_VERSION
-    log "Setting CONFIG_LOCALVERSION=\"$CUSTOM_LOCALVERSION\" in .config"
+    # Dynamically apply LOCALVERSION based on KERNEL_NAME and KERNEL_VERSION.
+    # Also disable LOCALVERSION_AUTO so `uname -r` never gets a `-g<commit>`
+    # suffix appended by the kernel build (the commit stays in build metadata).
+    log "Setting CONFIG_LOCALVERSION=\"$CUSTOM_LOCALVERSION\" (LOCALVERSION_AUTO off)"
     ./scripts/config --file "$OUT_DIR/.config" --set-str LOCALVERSION "$CUSTOM_LOCALVERSION"
+    ./scripts/config --file "$OUT_DIR/.config" --disable LOCALVERSION_AUTO
 
     # shellcheck disable=SC2086
     make O="$OUT_DIR" ARCH="$ARCH" CC="$CC" \
@@ -205,7 +264,8 @@ build_kernel() {
     log "Commit ID:    $COMMIT_HASH"
     log "Device:       $DEVICE_NAME ($DEVICE_CODENAME)"
     log "Maintainer:   $MAINTAINER"
-    log "Localversion: $CUSTOM_LOCALVERSION"
+    log "uname -r:     ${LINUX_VERSION}${CUSTOM_LOCALVERSION}"
+    log "Extended Ver: ${LINUX_VERSION}${EXTENDED_LOCALVERSION}"
     log "Defconfig:    $DEFCONFIG"
     log "Output Dir:   $BUILD_DIR"
     log "Object Dir:   $OUT_DIR"
@@ -234,6 +294,7 @@ build_kernel() {
     else
         log "Reusing existing .config in $OUT_DIR"
         ./scripts/config --file "$OUT_DIR/.config" --set-str LOCALVERSION "$CUSTOM_LOCALVERSION"
+        ./scripts/config --file "$OUT_DIR/.config" --disable LOCALVERSION_AUTO
         # shellcheck disable=SC2086
         make O="$OUT_DIR" ARCH="$ARCH" CC="$bcc" \
             CLANG_TRIPLE="$CLANG_TRIPLE" CROSS_COMPILE="$CROSS_COMPILE" \
@@ -306,15 +367,13 @@ package_zip() {
     commit_date="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || date +'%Y-%m-%d %H:%M')"
     commit_subject="$(git log -1 --format=%s 2>/dev/null || echo "Release build")"
     git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "gaming")"
-    kver="4.14.$(grep -m1 '^SUBLEVEL =' "$ROOT_DIR/Makefile" | awk '{print $3}')"
+    kver="$LINUX_VERSION"
     toolchain_ver="TheRagingBeast TRB Clang 18.0.0 (17092023)"
 
     local kernel_name_upper version_name_upper
     kernel_name_upper="$(echo "$KERNEL_NAME" | tr '[:lower:]' '[:upper:]')"
     version_name_upper="$(echo "$VERSION_NAME" | tr '[:lower:]' '[:upper:]')"
     local full_title="${KERNEL_NAME} Kernel ${KERNEL_VERSION} [${VERSION_NAME}]"
-    local kver="4.14.$(grep -m1 '^SUBLEVEL =' "$ROOT_DIR/Makefile" | awk '{print $3}')"
-    local toolchain_ver="TheRagingBeast TRB Clang 18.0.0 (17092023)"
 
     # Generate dynamic changelog ui_print statements for TWRP
     local changelog_ui=""
@@ -335,7 +394,8 @@ package_zip() {
         echo " Commit ID: $COMMIT_HASH"
         echo " Maintainer: $MAINTAINER"
         echo " Motto: We aim for stability, not for anything else."
-        echo " Linux: v$kver | Date: $COMMIT_DATE"
+        echo " Linux (uname -r): v$kver$CUSTOM_LOCALVERSION | Date: $COMMIT_DATE"
+        echo " Extended Version: v$kver$EXTENDED_LOCALVERSION"
         echo " Toolchain: $toolchain_ver"
         echo " Defconfig: $DEFCONFIG (APatch ready)"
         echo " Memory: iOS-Style On-Demand Multi-Stream Compressed ZRAM"
@@ -353,7 +413,7 @@ package_zip() {
 
 ## AnyKernel setup
 properties() { '
-kernel.string=${KERNEL_NAME} ${KERNEL_VERSION} [${VERSION_NAME}] (${COMMIT_HASH}) by ${MAINTAINER} for ${DEVICE_NAME} (${DEVICE_CODENAME})
+kernel.string=${KERNEL_NAME} ${KERNEL_VERSION} [${VERSION_NAME}] by ${MAINTAINER} for ${DEVICE_NAME} (${DEVICE_CODENAME})
 do.devicecheck=1
 do.modules=0
 do.systemless=0
@@ -393,7 +453,8 @@ ui_print "  * Device       : ${DEVICE_NAME} (${DEVICE_CODENAME})";
 ui_print "  * Maintainer   : ${MAINTAINER}             ";
 ui_print "  * Motto        : We aim for stability,     ";
 ui_print "                   not for anything else.    ";
-ui_print "  * Linux Ver    : $kver                     ";
+ui_print "  * uname -r     : $kver$CUSTOM_LOCALVERSION";
+ui_print "  * Extended Ver : $kver$EXTENDED_LOCALVERSION";
 ui_print "  * Build Date   : $COMMIT_DATE              ";
 ui_print "  * Toolchain    : $toolchain_ver            ";
 ui_print "  * Features     : APatch / KernelPatch ready";
@@ -796,36 +857,304 @@ AK_EOF
 
     local zip_file="$BUILD_DIR/${ZIP_BASE}.zip"
     log "Packaging AnyKernel3 flashable zip: $zip_file"
-    (cd "$stage" && zip -r9 "$zip_file" . -x '*.git*' -x '.github*')
+    # -X strips extra file attributes (uid/gid/timestamps) so identical inputs
+    # produce identical archives across hosts.
+    (cd "$stage" && zip -r9 -X "$zip_file" . -x '*.git*' -x '.github*')
     rm -rf "$stage"
 
-    # Also maintain latest.zip, versioned zip, and date-stamped copies in build/
-    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DATE}.zip"
-    cp -f "$zip_file" "$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}.zip"
+    # Also maintain latest.zip, a date-stamped copy, and the commit/device
+    # links in build/. Skip copies that would resolve to the primary archive:
+    # the commit id is no longer part of the name, so the device name can now
+    # collide with it.
+    local date_zip="$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DATE}.zip"
+    local device_zip="$BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}.zip"
+    if [[ "$date_zip" != "$zip_file" ]]; then
+        cp -f "$zip_file" "$date_zip"
+    fi
+    if [[ "$device_zip" != "$zip_file" ]]; then
+        cp -f "$zip_file" "$device_zip"
+    fi
     ln -sf "$(basename "$zip_file")" "$BUILD_DIR/latest.zip"
     ln -sf "$(basename "$zip_file")" "$BUILD_DIR/${COMMIT_HASH}.zip"
+
+    write_build_metadata "$zip_file"
 
     log "================================================="
     log "BUILD SUCCEEDED!"
     log "Package ZIP:   $zip_file"
     log "Commit Link:   $BUILD_DIR/${COMMIT_HASH}.zip"
     log "Latest Link:   $BUILD_DIR/latest.zip"
-    log "Device Link:   $BUILD_DIR/${KERNEL_NAME}-${KERNEL_VERSION}-${VERSION_NAME}-${DEVICE_CODENAME}.zip"
+    if [[ "$device_zip" != "$zip_file" ]]; then
+        log "Device Link:   $device_zip"
+    fi
     log "Kernel Image:  $BUILD_DIR/Image.gz-dtb"
+    log "Metadata:      $BUILD_DIR/build-info.env"
     log "================================================="
+}
+
+# ---------------------------------------------------------------------------
+# Build metadata
+# ---------------------------------------------------------------------------
+# Emit a shell-sourceable env file plus a JSON twin so CI (and humans) can read
+# the exact artifact identity without re-deriving it from the branch name.
+write_build_metadata() {
+    local zip_file="$1"
+    local zip_name zip_size zip_size_h zip_sha256 zip_md5
+    zip_name="$(basename "$zip_file")"
+    zip_size="$(stat -c%s "$zip_file" 2>/dev/null || wc -c < "$zip_file")"
+    zip_size_h="$(du -h "$zip_file" | awk '{print $1}')"
+    zip_sha256="$(sha256sum "$zip_file" | awk '{print $1}')"
+    zip_md5="$(md5sum "$zip_file" | awk '{print $1}')"
+    local linux_ver="$LINUX_VERSION"
+
+    local info="$BUILD_DIR/build-info.env"
+    mkdir -p "$BUILD_DIR"
+    {
+        printf '# Pox build metadata - generated %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'KERNEL_NAME=%q\n'        "$KERNEL_NAME"
+        printf 'KERNEL_VERSION=%q\n'     "$KERNEL_VERSION"
+        printf 'VERSION_NAME=%q\n'       "$VERSION_NAME"
+        printf 'BRANCH_DESC=%q\n'        "$BRANCH_DESC"
+        printf 'GIT_BRANCH=%q\n'         "$GIT_BRANCH"
+        printf 'COMMIT_HASH=%q\n'        "$COMMIT_HASH"
+        printf 'COMMIT_FULL=%q\n'        "$(git rev-parse HEAD 2>/dev/null || echo "$COMMIT_HASH")"
+        printf 'COMMIT_DATE=%q\n'        "$COMMIT_DATE"
+        printf 'COMMIT_SUBJECT=%q\n'     "$COMMIT_SUBJECT"
+        printf 'DEFCONFIG=%q\n'          "$DEFCONFIG"
+        printf 'DEVICE_NAME=%q\n'        "$DEVICE_NAME"
+        printf 'DEVICE_CODENAME=%q\n'    "$DEVICE_CODENAME"
+        printf 'MAINTAINER=%q\n'         "$MAINTAINER"
+        printf 'LINUX_VERSION=%q\n'      "$linux_ver"
+        printf 'LOCALVERSION=%q\n'          "${LINUX_VERSION}${CUSTOM_LOCALVERSION}"
+        printf 'LOCALVERSION_EXTENDED=%q\n' "${LINUX_VERSION}${EXTENDED_LOCALVERSION}"
+        printf 'TOOLCHAIN=%q\n'          "TheRagingBeast TRB Clang 18.0.0 (17092023)"
+        printf 'BUILD_DATE=%q\n'         "$DATE"
+        printf 'ZIP_PATH=%q\n'           "$zip_file"
+        printf 'ZIP_NAME=%q\n'           "$zip_name"
+        printf 'ZIP_SIZE_BYTES=%q\n'     "$zip_size"
+        printf 'ZIP_SIZE_HUMAN=%q\n'     "$zip_size_h"
+        printf 'ZIP_SHA256=%q\n'         "$zip_sha256"
+        printf 'ZIP_MD5=%q\n'            "$zip_md5"
+    } > "$info"
+
+    if command -v python3 >/dev/null 2>&1; then
+        POX_KERNEL_NAME="$KERNEL_NAME" \
+        POX_KERNEL_VERSION="$KERNEL_VERSION" \
+        POX_VERSION_NAME="$VERSION_NAME" \
+        POX_BRANCH_DESC="$BRANCH_DESC" \
+        POX_GIT_BRANCH="$GIT_BRANCH" \
+        POX_COMMIT_HASH="$COMMIT_HASH" \
+        POX_COMMIT_FULL="$(git rev-parse HEAD 2>/dev/null || echo "$COMMIT_HASH")" \
+        POX_COMMIT_DATE="$COMMIT_DATE" \
+        POX_COMMIT_SUBJECT="$COMMIT_SUBJECT" \
+        POX_DEFCONFIG="$DEFCONFIG" \
+        POX_DEVICE_NAME="$DEVICE_NAME" \
+        POX_DEVICE_CODENAME="$DEVICE_CODENAME" \
+        POX_MAINTAINER="$MAINTAINER" \
+        POX_LINUX_VERSION="$linux_ver" \
+        POX_LOCALVERSION="${LINUX_VERSION}${CUSTOM_LOCALVERSION}" \
+        POX_LOCALVERSION_EXTENDED="${LINUX_VERSION}${EXTENDED_LOCALVERSION}" \
+        POX_ZIP_NAME="$zip_name" \
+        POX_ZIP_SIZE_BYTES="$zip_size" \
+        POX_ZIP_SIZE_HUMAN="$zip_size_h" \
+        POX_ZIP_SHA256="$zip_sha256" \
+        POX_ZIP_MD5="$zip_md5" \
+        python3 - "$BUILD_DIR/build-info.json" <<'PY'
+import json, os, sys
+data = {k[4:].lower(): v for k, v in os.environ.items() if k.startswith("POX_")}
+with open(sys.argv[1], "w") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+    else
+        warn "python3 not found; skipping JSON metadata"
+    fi
+
+    log "Build metadata written to: $info"
+}
+
+# ---------------------------------------------------------------------------
+# Uploads (Gofile + PixelDrain)
+# ---------------------------------------------------------------------------
+# Resolve the flashable zip produced by `package_zip`. Prefers an explicit
+# ZIP_FILE, then the latest.zip symlink, then the newest versioned archive.
+find_artifact_zip() {
+    if [[ -n "${ZIP_FILE:-}" && -f "$ZIP_FILE" ]]; then
+        printf '%s\n' "$ZIP_FILE"
+        return 0
+    fi
+
+    if [[ -L "$BUILD_DIR/latest.zip" ]]; then
+        local resolved
+        resolved="$(readlink -f "$BUILD_DIR/latest.zip" 2>/dev/null || true)"
+        if [[ -n "$resolved" && -f "$resolved" ]]; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+    elif [[ -f "$BUILD_DIR/latest.zip" ]]; then
+        printf '%s\n' "$BUILD_DIR/latest.zip"
+        return 0
+    fi
+
+    local newest
+    newest="$(ls -t "$BUILD_DIR"/${KERNEL_NAME}-*.zip 2>/dev/null | grep -v 'latest\.zip' | head -n1 || true)"
+    if [[ -n "$newest" && -f "$newest" ]]; then
+        printf '%s\n' "$newest"
+        return 0
+    fi
+
+    return 1
+}
+
+# Write a small KEY=value file (shell-quoted) with the upload result.
+write_upload_result() {
+    local out="$1"
+    shift
+    mkdir -p "$BUILD_DIR"
+    : > "$out"
+    while (( $# >= 2 )); do
+        printf '%s=%q\n' "$1" "$2" >> "$out"
+        shift 2
+    done
+}
+
+upload_gofile() {
+    local zip_file
+    zip_file="$(find_artifact_zip)" || { err "No flashable zip found. Run ./build.sh all first."; return 1; }
+    command -v curl >/dev/null 2>&1 || { err "curl is required for Gofile upload."; return 1; }
+
+    local token="${GOFILE_TOKEN:-}"
+    local folder="${GOFILE_FOLDER_ID:-}"
+    local zip_name local_md5
+    zip_name="$(basename "$zip_file")"
+    local_md5="$(md5sum "$zip_file" | awk '{print $1}')"
+
+    log "Resolving Gofile upload server ..."
+    local servers
+    servers="$(curl -fsS --max-time 30 https://api.gofile.io/servers 2>/dev/null \
+        | python3 -c "import json,sys;print(' '.join(s.get('name','') for s in json.load(sys.stdin).get('data',{}).get('servers',[])))" 2>/dev/null || true)"
+    if [[ -z "$servers" ]]; then
+        err "Gofile server list unavailable."
+        return 1
+    fi
+
+    local server resp page id remote_md5
+    resp=""
+    for server in $servers; do
+        log "Uploading $zip_name to Gofile server: $server"
+        local curl_args=(-fsS --max-time 900 -F "file=@${zip_file}")
+        [[ -n "$token" ]]  && curl_args+=(-F "token=${token}")
+        [[ -n "$folder" ]] && curl_args+=(-F "folderId=${folder}")
+        resp="$(curl "${curl_args[@]}" "https://${server}.gofile.io/contents/uploadfile" 2>/dev/null || true)"
+        if grep -q '"downloadPage"' <<<"$resp"; then
+            break
+        fi
+        resp=""
+    done
+
+    if [[ -z "$resp" ]]; then
+        err "Gofile upload failed on every server."
+        return 1
+    fi
+
+    page="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data'].get('downloadPage',''))" <<<"$resp" 2>/dev/null || true)"
+    id="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data'].get('id',''))" <<<"$resp" 2>/dev/null || true)"
+    remote_md5="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data'].get('md5',''))" <<<"$resp" 2>/dev/null || true)"
+
+    if [[ -z "$page" ]]; then
+        err "Gofile response did not contain a download page."
+        return 1
+    fi
+
+    log "Gofile mirror: $page"
+    if [[ -n "$remote_md5" && "$remote_md5" != "$local_md5" ]]; then
+        warn "Gofile md5 mismatch (local=$local_md5 remote=$remote_md5)"
+    fi
+
+    write_upload_result "$BUILD_DIR/gofile.env" \
+        GOFILE_URL "$page" \
+        GOFILE_ID "$id" \
+        GOFILE_MD5 "$local_md5"
+    log "Gofile result written to: $BUILD_DIR/gofile.env"
+}
+
+upload_pixeldrain() {
+    local zip_file
+    zip_file="$(find_artifact_zip)" || { err "No flashable zip found. Run ./build.sh all first."; return 1; }
+    command -v curl >/dev/null 2>&1 || { err "curl is required for PixelDrain upload."; return 1; }
+
+    local key="${PIXELDRAIN_API_KEY:-}"
+    if [[ -z "$key" ]]; then
+        warn "PIXELDRAIN_API_KEY is not set; skipping PixelDrain upload."
+        return 0
+    fi
+
+    local zip_name
+    zip_name="$(basename "$zip_file")"
+    log "Uploading $zip_name to PixelDrain ..."
+
+    # PUT with the API key as the HTTP Basic password (empty username).
+    local resp
+    resp="$(curl -fsS --max-time 900 -T "$zip_file" -u ":${key}" \
+        "https://pixeldrain.com/api/file/" 2>/dev/null || true)"
+
+    if [[ -z "$resp" ]]; then
+        err "PixelDrain upload failed (empty response)."
+        return 1
+    fi
+
+    local id
+    id="$(python3 -c "import json,sys;print(json.load(sys.stdin).get('id',''))" <<<"$resp" 2>/dev/null || true)"
+    if [[ -z "$id" ]]; then
+        err "PixelDrain response did not contain a file id."
+        return 1
+    fi
+
+    local page="https://pixeldrain.com/u/${id}"
+    log "PixelDrain mirror: $page"
+    write_upload_result "$BUILD_DIR/pixeldrain.env" \
+        PIXELDRAIN_URL "$page" \
+        PIXELDRAIN_ID "$id"
+    log "PixelDrain result written to: $BUILD_DIR/pixeldrain.env"
+}
+
+# Best-effort: mirror to both providers and merge the results. Individual
+# provider failures are reported but do not abort the other upload.
+upload_all() {
+    local rc=0
+    local gofile_env="$BUILD_DIR/gofile.env"
+    local pixeldrain_env="$BUILD_DIR/pixeldrain.env"
+    local combined="$BUILD_DIR/upload-info.env"
+    : > "$gofile_env"
+    : > "$pixeldrain_env"
+
+    upload_gofile || rc=1
+    upload_pixeldrain || rc=1
+
+    {
+        printf '# Pox mirror results - generated %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        cat "$gofile_env" "$pixeldrain_env"
+    } > "$combined"
+    log "Combined mirror results written to: $combined"
+
+    return "$rc"
+}
+
+# Print the build metadata for the most recent artifact, generating it if the
+# zip exists but the metadata file does not.
+show_info() {
+    local info="$BUILD_DIR/build-info.env"
+    if [[ ! -f "$info" ]]; then
+        local zip_file
+        zip_file="$(find_artifact_zip)" || { err "No build metadata and no flashable zip found."; return 1; }
+        write_build_metadata "$zip_file"
+    fi
+    cat "$info"
 }
 
 install_device() {
     local zip_file
-    zip_file=$(ls -t "$BUILD_DIR"/${ZIP_BASE}*.zip 2>/dev/null | head -n 1 || true)
-    if [[ -z "$zip_file" || ! -f "$zip_file" ]]; then
-        if [[ -f "$BUILD_DIR/latest.zip" ]]; then
-            zip_file="$BUILD_DIR/latest.zip"
-        else
-            err "No AnyKernel3 zip found in $BUILD_DIR. Please run ./build.sh all first."
-            exit 1
-        fi
-    fi
+    zip_file="$(find_artifact_zip)" || { err "No AnyKernel3 zip found in $BUILD_DIR. Please run ./build.sh all first."; return 1; }
 
     log "Checking ADB connection to device..."
     if ! command -v adb >/dev/null 2>&1; then
@@ -867,6 +1196,18 @@ case "$ACTION" in
     zip|package)
         package_zip
         ;;
+    info)
+        show_info
+        ;;
+    gofile)
+        upload_gofile
+        ;;
+    pixeldrain)
+        upload_pixeldrain
+        ;;
+    upload)
+        upload_all
+        ;;
     install)
         install_device
         ;;
@@ -879,9 +1220,34 @@ case "$ACTION" in
         build_kernel
         package_zip
         ;;
+    help|-h|--help)
+        cat <<USAGE
+Usage: $0 [action]
+
+Actions:
+  all (default)      Configure, build the kernel, and package the flashable zip
+  kernel             Build the kernel image only
+  zip | package      Package build/Image.gz-dtb into an AnyKernel3 zip
+  info               Print the metadata for the most recent artifact
+  gofile             Mirror the latest zip to Gofile (GOFILE_TOKEN optional)
+  pixeldrain         Mirror the latest zip to PixelDrain (PIXELDRAIN_API_KEY required)
+  upload             Mirror to every configured provider (Gofile + PixelDrain)
+  install            Push the latest zip to a connected device via adb
+  build-install      Build, package, then push to a connected device
+  menuconfig         Open the kernel configuration menu
+  clean              Remove object output (keeps the packaged zips)
+  distclean          Remove the whole build directory
+  help               Show this help
+
+Environment:
+  GIT_BRANCH, DEFCONFIG, VERSION_NAME, PACKAGE_NAME, LOCALVERSION, EXTENDED_LOCALVERSION
+  JOBS, EXTRA_FLAGS, CCACHE, SKIP_LOAD_CHECK, KEEP_CUSTOM_FLAGS
+  GOFILE_TOKEN, GOFILE_FOLDER_ID, PIXELDRAIN_API_KEY
+USAGE
+        ;;
     *)
         err "Unknown action: $ACTION"
-        echo "Usage: $0 [all|kernel|zip|install|build-install|menuconfig|clean|distclean]"
+        echo "Usage: $0 [all|kernel|zip|info|gofile|pixeldrain|upload|install|build-install|menuconfig|clean|distclean|help]"
         exit 1
         ;;
 esac

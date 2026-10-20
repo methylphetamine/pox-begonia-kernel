@@ -4,7 +4,36 @@ on:
   push:
     branches:
       - '**'
+    tags:
+      - 'release/**'
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      root:
+        description: 'Root solution / edition'
+        required: true
+        default: 'onyx'
+        type: choice
+        options:
+          - onyx
+          - onyx-apatch
+          - onyx-folkpatch
+          - onyx-ksu-next
+          - onyx-resukisu
+          - onyx-bakasu
+          - onyx-kaeru
+          - granite
+          - obsidian
+      miui:
+        description: 'Add MIUI/HyperOS overlay'
+        required: false
+        default: false
+        type: boolean
+      c2:
+        description: 'Add Codec2 media overlay'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -55,103 +84,70 @@ jobs:
         id: build_kernel
         run: |
           bash kerdevdep/setup_kerdevdep.sh
-          export GITHUB_REF_NAME="${{ github.ref_name }}"
+          # A single branch can build any root flavor from a manual dispatch:
+          # the chosen inputs are folded into GIT_BRANCH, which build.sh's
+          # resolver turns into the edition name + defconfig.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            REF="${{ github.event.inputs.root }}"
+            [[ "${{ github.event.inputs.miui }}" == "true" ]] && REF="${REF}-miui"
+            [[ "${{ github.event.inputs.c2 }}" == "true" ]] && REF="${REF}-c2"
+          else
+            REF="${{ github.ref_name }}"
+          fi
+          export GITHUB_REF_NAME="$REF"
+          export GIT_BRANCH="$REF"
           ./build.sh all
 
-          if [[ -L build/latest.zip ]]; then
-            ZIP_PATH="$(readlink -f build/latest.zip)"
-          else
-            ZIP_PATH="$(ls -t build/Pox-*.zip 2>/dev/null | grep -v 'latest\.zip' | head -n 1 || true)"
-          fi
+          # build.sh is the single source of truth for artifact identity.
+          source build/build-info.env
 
-          if [[ -z "$ZIP_PATH" || ! -f "$ZIP_PATH" ]]; then
-            echo "::error::Flashable zip not found in build directory"
-            exit 1
-          fi
-
-          BRANCH_NAME="${{ github.ref_name }}"
-          case "$BRANCH_NAME" in
-            onyx-sultan-apatch*|*sultan-apatch*|*sultan*)
-              EDITION="Onyx-Sultan-APatch"
-              EDITION_DESC="Zero Frame-Drop & Sultan Debloat APatch Edition"
-              ROOT_INFO="APatch / KernelPatch Supported + Sultan Debloat"
-              ;;
-            onyx-resukisu*|*resukisu*)
-              EDITION="Onyx-ReSukiSu"
-              EDITION_DESC="Zero Frame-Drop Gaming & ReSukiSu Ultra Edition"
-              ROOT_INFO="ReSukiSu v4.2.0 (40901) + SuSFS v2.3.0 + NoMount 2.0.0 (Multi-Manager, App Profile, SELinux Hide)"
-              ;;
-            onyx-apatch*|*apatch*)
-              EDITION="Onyx-APatch"
-              EDITION_DESC="Zero Frame-Drop Gaming & APatch Edition"
-              ROOT_INFO="APatch / KernelPatch Supported (CONFIG_KALLSYMS_ALL=y, CONFIG_KPROBES=y, OverlayFS redirect & index)"
-              ;;
-            onyx-ksu-next*|*ksu-next*)
-              EDITION="Onyx-KSU-Next"
-              EDITION_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
-              ROOT_INFO="KernelSU-Next v3.3.0 + NoMount VFS"
-              ;;
-            onyx-kaeru*|*kaeru*)
-              EDITION="Onyx-Kaeru"
-              EDITION_DESC="Zero Frame-Drop Gaming & Kaeru Bootloader Edition"
-              ROOT_INFO="Kaeru Bootloader & Merged DTB Ready (Unrooted / APatch)"
-              ;;
-            main|granite)
-              EDITION="Granite"
-              EDITION_DESC="Rock-Solid Stability Edition"
-              ROOT_INFO="Standard Edition (KernelPatch / APatch Ready)"
-              ;;
-            obsidian)
-              EDITION="Obsidian"
-              EDITION_DESC="iOS-Style Compressed Memory Edition"
-              ROOT_INFO="Standard Edition (KernelPatch / APatch Ready)"
-              ;;
-            onyx|*)
-              EDITION="Onyx"
-              EDITION_DESC="Zero Frame-Drop Gaming Edition (Unrooted)"
-              ROOT_INFO="None (Strictly Unrooted - Pure Stock Play Integrity)"
-              ;;
-          esac
-
-          COMMIT_SHORT="$(git rev-parse --short=7 HEAD 2>/dev/null || echo "${{ github.sha }}" | cut -c1-7)"
-          TAG_NAME="Pox-1.0.0-Beta-${EDITION}-${COMMIT_SHORT}"
-          RELEASE_TITLE="Pox Kernel 1.0.0-Beta [${EDITION}] (${COMMIT_SHORT})"
-
-          echo "ZIP_PATH=$ZIP_PATH" >> $GITHUB_ENV
-          echo "ZIP_NAME=$(basename "$ZIP_PATH")" >> $GITHUB_ENV
-          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
-          echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
-          echo "EDITION=$EDITION" >> $GITHUB_ENV
-          echo "EDITION_DESC=$EDITION_DESC" >> $GITHUB_ENV
-          echo "ROOT_INFO=$ROOT_INFO" >> $GITHUB_ENV
-          echo "COMMIT_SHORT=$COMMIT_SHORT" >> $GITHUB_ENV
+          {
+            echo "ZIP_PATH=$ZIP_PATH"
+            echo "ZIP_NAME=$ZIP_NAME"
+            echo "VERSION_NAME=$VERSION_NAME"
+            echo "BRANCH_DESC=$BRANCH_DESC"
+            echo "GIT_BRANCH=$GIT_BRANCH"
+            echo "COMMIT_HASH=$COMMIT_HASH"
+            echo "COMMIT_SUBJECT=$COMMIT_SUBJECT"
+            echo "DEFCONFIG=$DEFCONFIG"
+            echo "LINUX_VERSION=$LINUX_VERSION"
+            echo "LOCALVERSION=$LOCALVERSION"
+            echo "LOCALVERSION_EXTENDED=$LOCALVERSION_EXTENDED"
+            echo "KERNEL_VERSION=$KERNEL_VERSION"
+            echo "ZIP_SHA256=$ZIP_SHA256"
+            echo "ZIP_SIZE_HUMAN=$ZIP_SIZE_HUMAN"
+            echo "ZIP_SIZE_BYTES=$ZIP_SIZE_BYTES"
+          } >> "$GITHUB_ENV"
 
       - name: Generate Release Notes
         run: |
+          source build/build-info.env
           cat <<EOF > release_notes.md
-          # Pox Kernel 1.0.0-Beta [${{ env.EDITION }} Edition]
+          # Pox Kernel ${KERNEL_VERSION} [${VERSION_NAME}]
 
           > *"We aim for stability, not for anything else."*
 
           ### Release Information
-          - **Edition**: ${{ env.EDITION }} (${{ env.EDITION_DESC }})
-          - **Root Support**: ${{ env.ROOT_INFO }}
-          - **Version**: 1.0.0-Beta
-          - **Branch**: \`${{ github.ref_name }}\`
-          - **Commit**: \`${{ env.COMMIT_SHORT }}\`
-          - **Device**: Xiaomi Redmi Note 8 Pro (\`begonia\` / \`begonia_in\`)
+          - **Edition**: ${VERSION_NAME} (${BRANCH_DESC})
+          - **Branch**: \`${GIT_BRANCH}\`
+          - **Commit**: \`${COMMIT_HASH}\` — ${COMMIT_SUBJECT}
+          - **Defconfig**: \`${DEFCONFIG}\`
+          - **Device**: ${DEVICE_NAME} (\`${DEVICE_CODENAME}\` / \`${DEVICE_CODENAME}_in\`)
           - **SoC**: MediaTek MT6785 / Helio G90T
-          - **Linux Version**: 4.14.357 LTS
-          - **Toolchain**: TheRagingBeast TRB Clang 18.0.0 (17092023)
+          - **Linux Version**: ${LINUX_VERSION} LTS
+          - **Kernel Release**: \`${LOCALVERSION}\` (extended: \`${LOCALVERSION_EXTENDED}\`)
+          - **Toolchain**: ${TOOLCHAIN}
 
           ### Release Assets
-          - **Flashable Recovery ZIP**: \`${{ env.ZIP_NAME }}\` (Install via TWRP / OrangeFox)
+          - **Flashable Recovery ZIP**: \`${ZIP_NAME}\` (Install via TWRP / OrangeFox)
           - **Kernel Binary**: \`Image.gz-dtb\`
+          - **Size**: ${ZIP_SIZE_HUMAN}
+          - **SHA256**: \`${ZIP_SHA256}\`
 
           ### Flashing Guide
           1. Reboot to Custom Recovery (TWRP, OrangeFox, PBRP).
           2. (Recommended) Perform a NANDroid backup of the \`Boot\` partition.
-          3. Flash \`${{ env.ZIP_NAME }}\`.
+          3. Flash \`${ZIP_NAME}\`.
           4. Reboot system.
 
           ---
@@ -167,44 +163,50 @@ jobs:
           path: |
             ${{ env.ZIP_PATH }}
             build/Image.gz-dtb
+            build/build-info.env
+            build/build-info.json
+            build/gofile.env
+            build/pixeldrain.env
+            build/upload-info.env
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Mirror to Gofile
         continue-on-error: true
+        env:
+          GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
+          GOFILE_FOLDER_ID: ${{ secrets.GOFILE_FOLDER_ID }}
         run: |
-          ZIP_FILE="$ZIP_PATH"
-          [[ -f "$ZIP_FILE" ]] || { echo "::warning::No zip to mirror"; exit 0; }
-          LOCAL_MD5="$(md5sum "$ZIP_FILE" | awk '{print $1}')"
-          SERVERS="$(curl -sS https://api.gofile.io/servers | python3 -c "import json,sys;print(' '.join(s['name'] for s in json.load(sys.stdin)['data']['servers']))" || true)"
-          if [[ -z "$SERVERS" ]]; then
-            echo "::warning::Gofile server list unavailable"
-            exit 0
+          ./build.sh gofile || true
+          if [[ -f build/gofile.env ]]; then
+            source build/gofile.env
+            if [[ -n "${GOFILE_URL:-}" ]]; then
+              {
+                echo "### Gofile Mirror"
+                echo ""
+                echo "- **Download page**: ${GOFILE_URL}"
+                echo "- **md5**: \`${GOFILE_MD5:-unknown}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
-          RESP=""
-          for SERVER in $SERVERS; do
-            echo "Gofile server: $SERVER"
-            RESP="$(curl -sS --max-time 900 -F "file=@${ZIP_FILE}" "https://${SERVER}.gofile.io/contents/uploadfile" || true)"
-            grep -q '"downloadPage"' <<<"$RESP" && break
-            RESP=""
-          done
-          if [[ -z "$RESP" ]]; then
-            echo "::warning::Gofile mirror upload failed"
-            exit 0
+
+      - name: Mirror to PixelDrain
+        continue-on-error: true
+        env:
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+        run: |
+          ./build.sh pixeldrain || true
+          if [[ -f build/pixeldrain.env ]]; then
+            source build/pixeldrain.env
+            if [[ -n "${PIXELDRAIN_URL:-}" ]]; then
+              {
+                echo "### PixelDrain Mirror"
+                echo ""
+                echo "- **Download page**: ${PIXELDRAIN_URL}"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
-          PAGE="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['downloadPage'])" <<<"$RESP")"
-          REMOTE_MD5="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['md5'])" <<<"$RESP")"
-          echo "Gofile mirror page: $PAGE"
-          echo "GOFILE_PAGE=$PAGE" >> $GITHUB_ENV
-          echo "md5 local=$LOCAL_MD5 remote=$REMOTE_MD5"
-          if [[ "$REMOTE_MD5" != "$LOCAL_MD5" ]]; then
-            echo "::warning::Gofile md5 mismatch"
-          fi
-          {
-            echo "### Gofile Mirror"
-            echo ""
-            echo "- **Download page**: $PAGE"
-            echo "- **md5**: \`$LOCAL_MD5\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Notify Telegram
         continue-on-error: true
         env:
@@ -215,8 +217,14 @@ jobs:
             echo "::warning::TELEGRAM_BOT_TOKEN not configured - skipping Telegram notification"
             exit 0
           fi
+
           API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-          ZIP_FILE="${ZIP_PATH:-}"
+
+          [[ -f build/build-info.env ]] && source build/build-info.env
+          [[ -f build/gofile.env ]] && source build/gofile.env
+          [[ -f build/pixeldrain.env ]] && source build/pixeldrain.env
+
+          ZIP_FILE="${ZIP_FILE:-${ZIP_PATH:-}}"
           if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
             ZIP_FILE="$(ls -t build/Pox-*.zip 2>/dev/null | head -n 1 || true)"
           fi
@@ -224,10 +232,23 @@ jobs:
             echo "::warning::No flashable zip found for Telegram upload"
             exit 0
           fi
+
           ZIP_BASE="${ZIP_NAME:-$(basename "$ZIP_FILE")}"
-          SHA256="$(sha256sum "$ZIP_FILE" | awk '{print $1}')"
-          SIZE="$(du -h "$ZIP_FILE" | awk '{print $1}')"
-          GOFILE="${GOFILE_PAGE:-unavailable}"
+          SHA256="${ZIP_SHA256:-$(sha256sum "$ZIP_FILE" | awk '{print $1}')}"
+          SIZE="${ZIP_SIZE_HUMAN:-$(du -h "$ZIP_FILE" | awk '{print $1}')}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          RELEASE_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG:-v1.0.0-Beta}"
+
+          # Build the link block from the mirrors that actually succeeded.
+          LINKS=""
+          [[ -n "${GOFILE_URL:-}" ]] && LINKS="${LINKS}Gofile: ${GOFILE_URL}"$'\n'
+          [[ -n "${PIXELDRAIN_URL:-}" ]] && LINKS="${LINKS}PixelDrain: ${PIXELDRAIN_URL}"$'\n'
+          [[ -z "$LINKS" ]] && LINKS="Mirrors: unavailable (see GitHub release)"$'\n'
+
+          MESSAGE="$(printf 'Pox Kernel %s [%s]\n%s\n\nBranch : %s\nCommit : %s\nKernel : %s\nFile   : %s (%s)\nSHA256 : %s\n%sGitHub : %s' \
+            "${KERNEL_VERSION:-1.0.0-Beta}" "${VERSION_NAME:-Onyx}" "${BRANCH_DESC:-Custom Edition}" \
+            "${GIT_BRANCH:-${GITHUB_REF_NAME}}" "${COMMIT_HASH:-unknown}" "${LOCALVERSION_EXTENDED:-unknown}" \
+            "$ZIP_BASE" "$SIZE" "${SHA256:0:16}..." "$LINKS" "$RUN_URL")"
 
           CHAT_ID="${TELEGRAM_CHAT_ID:-}"
           if [ -z "$CHAT_ID" ]; then
@@ -257,10 +278,6 @@ jobs:
             exit 0
           fi
 
-          MESSAGE="$(printf 'Pox Kernel 1.0.0-Beta [%s]\nBranch: %s\nCommit: %s\nFile: %s (%s)\nSHA256: %s\nGofile: %s\nRun: %s/%s/actions/runs/%s\n' \
-            "${EDITION:-unknown}" "${GITHUB_REF_NAME}" "${COMMIT_SHORT:-unknown}" "$ZIP_BASE" "$SIZE" "$SHA256" "$GOFILE" \
-            "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
-
           # One message per build: upload the zip with the summary as its
           # caption. Telegram caps captions at 1024 chars (this summary is far
           # shorter) and zip documents at 50 MB, so an oversize zip or a
@@ -285,6 +302,7 @@ jobs:
               --data-urlencode "disable_web_page_preview=true" > /tmp/tg_msg.json || true
             grep -q '"ok":true' /tmp/tg_msg.json 2>/dev/null || echo "::warning::Telegram sendMessage failed"
           fi
+
       - name: Upload to Mainline Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -302,18 +320,16 @@ jobs:
           fi
 
       - name: Publish Tagged Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ github.ref_name }}" \
             --target "${{ github.sha }}" \
-            --title "Pox Kernel ${{ github.ref_name }} [${{ env.EDITION }}]" \
+            --title "Pox Kernel ${{ github.ref_name }} [${{ env.VERSION_NAME }}]" \
             --notes-file release_notes.md \
             "${{ env.ZIP_PATH }}" \
             "build/Image.gz-dtb" || \
           gh release upload "${{ github.ref_name }}" \
             "${{ env.ZIP_PATH }}" \
             "build/Image.gz-dtb" --clobber
-
-
