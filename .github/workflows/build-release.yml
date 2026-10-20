@@ -58,16 +58,22 @@ jobs:
           export GITHUB_REF_NAME="${{ github.ref_name }}"
           ./build.sh all
 
-          if [[ -L build/latest.zip ]]; then
-            ZIP_PATH="$(readlink -f build/latest.zip)"
-          else
-            ZIP_PATH="$(ls -t build/Pox-*.zip 2>/dev/null | grep -v 'latest\.zip' | head -n 1 || true)"
-          fi
+          # Resolve both root variant zips (real files only; the variant
+          # symlinks like latest-APatch.zip are ignored via -type f).
+          ZIP_PATH_APATCH="$(find build -maxdepth 1 -type f -name '*-APatch.zip' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2- || true)"
+          ZIP_PATH_FOLKPATCH="$(find build -maxdepth 1 -type f -name '*-FolkPatch.zip' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n1 | cut -d' ' -f2- || true)"
 
-          if [[ -z "$ZIP_PATH" || ! -f "$ZIP_PATH" ]]; then
-            echo "::error::Flashable zip not found in build directory"
+          if [[ -z "$ZIP_PATH_APATCH" || ! -f "$ZIP_PATH_APATCH" ]]; then
+            echo "::error::APatch flashable zip not found in build directory"
             exit 1
           fi
+          if [[ -z "$ZIP_PATH_FOLKPATCH" || ! -f "$ZIP_PATH_FOLKPATCH" ]]; then
+            echo "::error::FolkPatch flashable zip not found in build directory"
+            exit 1
+          fi
+
+          # Primary artifact stays the FolkPatch zip for compatibility.
+          ZIP_PATH="$ZIP_PATH_FOLKPATCH"
 
           BRANCH_NAME="${{ github.ref_name }}"
           case "$BRANCH_NAME" in
@@ -119,6 +125,10 @@ jobs:
 
           echo "ZIP_PATH=$ZIP_PATH" >> $GITHUB_ENV
           echo "ZIP_NAME=$(basename "$ZIP_PATH")" >> $GITHUB_ENV
+          echo "ZIP_PATH_APATCH=$ZIP_PATH_APATCH" >> $GITHUB_ENV
+          echo "ZIP_NAME_APATCH=$(basename "$ZIP_PATH_APATCH")" >> $GITHUB_ENV
+          echo "ZIP_PATH_FOLKPATCH=$ZIP_PATH_FOLKPATCH" >> $GITHUB_ENV
+          echo "ZIP_NAME_FOLKPATCH=$(basename "$ZIP_PATH_FOLKPATCH")" >> $GITHUB_ENV
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
           echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
           echo "EDITION=$EDITION" >> $GITHUB_ENV
@@ -145,13 +155,21 @@ jobs:
           - **Toolchain**: TheRagingBeast TRB Clang 18.0.0 (17092023)
 
           ### Release Assets
-          - **Flashable Recovery ZIP**: \`${{ env.ZIP_NAME }}\` (Install via TWRP / OrangeFox)
+          - **Flashable Recovery ZIP (FolkPatch)**: \`${{ env.ZIP_NAME_FOLKPATCH }}\` (Install via TWRP / OrangeFox)
+          - **Flashable Recovery ZIP (APatch)**: \`${{ env.ZIP_NAME_APATCH }}\` (Install via TWRP / OrangeFox)
           - **Kernel Binary**: \`Image.gz-dtb\`
+
+          ### Bundled Root (Auto-Flash)
+          Both ZIPs carry the same kernel; each one bundles a single root
+          solution, flashes it right after the kernel, and stages its manager
+          app for automatic install on first boot:
+          - \`${{ env.ZIP_NAME_FOLKPATCH }}\` bundles FolkPatch (KernelPatch, LyraVoid/FolkPatch)
+          - \`${{ env.ZIP_NAME_APATCH }}\` bundles APatch (KernelPatch, bmax121/APatch)
 
           ### Flashing Guide
           1. Reboot to Custom Recovery (TWRP, OrangeFox, PBRP).
           2. (Recommended) Perform a NANDroid backup of the \`Boot\` partition.
-          3. Flash \`${{ env.ZIP_NAME }}\`.
+          3. Flash ONE of the two ZIPs above (kernel + bundled root auto-flash).
           4. Reboot system.
 
           ---
@@ -163,48 +181,63 @@ jobs:
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
+          name: Pox-Kernel-${{ env.EDITION }}-${{ env.COMMIT_SHORT }}
           path: |
-            ${{ env.ZIP_PATH }}
+            ${{ env.ZIP_PATH_APATCH }}
+            ${{ env.ZIP_PATH_FOLKPATCH }}
             build/Image.gz-dtb
           retention-days: 14
 
       - name: Mirror to Gofile
         continue-on-error: true
         run: |
-          ZIP_FILE="$ZIP_PATH"
-          [[ -f "$ZIP_FILE" ]] || { echo "::warning::No zip to mirror"; exit 0; }
-          LOCAL_MD5="$(md5sum "$ZIP_FILE" | awk '{print $1}')"
-          SERVERS="$(curl -sS https://api.gofile.io/servers | python3 -c "import json,sys;print(' '.join(s['name'] for s in json.load(sys.stdin)['data']['servers']))" || true)"
-          if [[ -z "$SERVERS" ]]; then
-            echo "::warning::Gofile server list unavailable"
-            exit 0
-          fi
-          RESP=""
-          for SERVER in $SERVERS; do
-            echo "Gofile server: $SERVER"
-            RESP="$(curl -sS --max-time 900 -F "file=@${ZIP_FILE}" "https://${SERVER}.gofile.io/contents/uploadfile" || true)"
-            grep -q '"downloadPage"' <<<"$RESP" && break
+          # Mirror each variant zip separately (guest uploads cannot share a
+          # folder); report one download page per variant.
+          for VARIANT in APatch FolkPatch; do
+            case "$VARIANT" in
+              APatch) ZIP_FILE="${ZIP_PATH_APATCH:-}";;
+              FolkPatch) ZIP_FILE="${ZIP_PATH_FOLKPATCH:-${ZIP_PATH:-}}";;
+            esac
+            if [[ -z "$ZIP_FILE" || ! -f "$ZIP_FILE" ]]; then
+              echo "::warning::No $VARIANT zip to mirror"
+              continue
+            fi
+            echo "[*] Mirroring $(basename "$ZIP_FILE") ($VARIANT)"
+            LOCAL_MD5="$(md5sum "$ZIP_FILE" | awk '{print $1}')"
+            SERVERS="$(curl -sS https://api.gofile.io/servers | python3 -c "import json,sys;print(' '.join(s['name'] for s in json.load(sys.stdin)['data']['servers']))" || true)"
+            if [[ -z "$SERVERS" ]]; then
+              echo "::warning::Gofile server list unavailable"
+              continue
+            fi
             RESP=""
+            for SERVER in $SERVERS; do
+              echo "Gofile server: $SERVER"
+              RESP="$(curl -sS --max-time 900 -F "file=@${ZIP_FILE}" "https://${SERVER}.gofile.io/contents/uploadfile" || true)"
+              grep -q '"downloadPage"' <<<"$RESP" && break
+              RESP=""
+            done
+            if [[ -z "$RESP" ]]; then
+              echo "::warning::Gofile mirror upload failed ($VARIANT)"
+              continue
+            fi
+            PAGE="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['downloadPage'])" <<<"$RESP")"
+            REMOTE_MD5="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['md5'])" <<<"$RESP")"
+            echo "Gofile mirror page ($VARIANT): $PAGE"
+            echo "GOFILE_PAGE_${VARIANT^^}=$PAGE" >> $GITHUB_ENV
+            if [[ "$VARIANT" == "FolkPatch" ]]; then
+              echo "GOFILE_PAGE=$PAGE" >> $GITHUB_ENV
+            fi
+            echo "md5 local=$LOCAL_MD5 remote=$REMOTE_MD5"
+            if [[ "$REMOTE_MD5" != "$LOCAL_MD5" ]]; then
+              echo "::warning::Gofile md5 mismatch ($VARIANT)"
+            fi
+            {
+              echo "### Gofile Mirror ($VARIANT)"
+              echo ""
+              echo "- **Download page**: $PAGE"
+              echo "- **md5**: \`$LOCAL_MD5\`"
+            } >> "$GITHUB_STEP_SUMMARY"
           done
-          if [[ -z "$RESP" ]]; then
-            echo "::warning::Gofile mirror upload failed"
-            exit 0
-          fi
-          PAGE="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['downloadPage'])" <<<"$RESP")"
-          REMOTE_MD5="$(python3 -c "import json,sys;print(json.load(sys.stdin)['data']['md5'])" <<<"$RESP")"
-          echo "Gofile mirror page: $PAGE"
-          echo "GOFILE_PAGE=$PAGE" >> $GITHUB_ENV
-          echo "md5 local=$LOCAL_MD5 remote=$REMOTE_MD5"
-          if [[ "$REMOTE_MD5" != "$LOCAL_MD5" ]]; then
-            echo "::warning::Gofile md5 mismatch"
-          fi
-          {
-            echo "### Gofile Mirror"
-            echo ""
-            echo "- **Download page**: $PAGE"
-            echo "- **md5**: \`$LOCAL_MD5\`"
-          } >> "$GITHUB_STEP_SUMMARY"
       - name: Notify Telegram
         continue-on-error: true
         env:
@@ -216,18 +249,24 @@ jobs:
             exit 0
           fi
           API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
-          ZIP_FILE="${ZIP_PATH:-}"
-          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
-            ZIP_FILE="$(ls -t build/Pox-*.zip 2>/dev/null | head -n 1 || true)"
+          ZIP_FILE_APATCH="${ZIP_PATH_APATCH:-}"
+          ZIP_FILE_FOLKPATCH="${ZIP_PATH_FOLKPATCH:-${ZIP_PATH:-}}"
+          if [ -z "$ZIP_FILE_APATCH" ] || [ ! -f "$ZIP_FILE_APATCH" ]; then
+            ZIP_FILE_APATCH="$(find build -maxdepth 1 -type f -name '*-APatch.zip' | head -n 1 || true)"
           fi
-          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
-            echo "::warning::No flashable zip found for Telegram upload"
+          if [ -z "$ZIP_FILE_FOLKPATCH" ] || [ ! -f "$ZIP_FILE_FOLKPATCH" ]; then
+            ZIP_FILE_FOLKPATCH="$(find build -maxdepth 1 -type f -name '*-FolkPatch.zip' | head -n 1 || true)"
+          fi
+          if [ -z "$ZIP_FILE_APATCH" ] && [ -z "$ZIP_FILE_FOLKPATCH" ]; then
+            echo "::warning::No flashable zips found for Telegram upload"
             exit 0
           fi
-          ZIP_BASE="${ZIP_NAME:-$(basename "$ZIP_FILE")}"
-          SHA256="$(sha256sum "$ZIP_FILE" | awk '{print $1}')"
-          SIZE="$(du -h "$ZIP_FILE" | awk '{print $1}')"
-          GOFILE="${GOFILE_PAGE:-unavailable}"
+          SHA256_APATCH="$( [ -n "$ZIP_FILE_APATCH" ] && sha256sum "$ZIP_FILE_APATCH" | awk '{print $1}' || echo unavailable )"
+          SHA256_FOLKPATCH="$( [ -n "$ZIP_FILE_FOLKPATCH" ] && sha256sum "$ZIP_FILE_FOLKPATCH" | awk '{print $1}' || echo unavailable )"
+          SIZE_APATCH="$( [ -n "$ZIP_FILE_APATCH" ] && du -h "$ZIP_FILE_APATCH" | awk '{print $1}' || echo unavailable )"
+          SIZE_FOLKPATCH="$( [ -n "$ZIP_FILE_FOLKPATCH" ] && du -h "$ZIP_FILE_FOLKPATCH" | awk '{print $1}' || echo unavailable )"
+          GOFILE_APATCH="${GOFILE_PAGE_APATCH:-unavailable}"
+          GOFILE_FOLKPATCH="${GOFILE_PAGE_FOLKPATCH:-unavailable}"
 
           CHAT_ID="${TELEGRAM_CHAT_ID:-}"
           if [ -z "$CHAT_ID" ]; then
@@ -257,25 +296,62 @@ jobs:
             exit 0
           fi
 
-          MESSAGE="$(printf 'Pox Kernel 1.0.0-Beta [%s]\nBranch: %s\nCommit: %s\nFile: %s (%s)\nSHA256: %s\nGofile: %s\nRun: %s/%s/actions/runs/%s\n' \
-            "${EDITION:-unknown}" "${GITHUB_REF_NAME}" "${COMMIT_SHORT:-unknown}" "$ZIP_BASE" "$SIZE" "$SHA256" "$GOFILE" \
+          MESSAGE="$(printf 'Pox Kernel 1.0.0-Beta [%s]\nBranch: %s\nCommit: %s\n\nFolkPatch zip: %s (%s)\nSHA256: %s\n\nAPatch zip: %s (%s)\nSHA256: %s\n\nGofile FolkPatch: %s\nGofile APatch: %s\nRun: %s/%s/actions/runs/%s\n' \
+            "${EDITION:-unknown}" "${GITHUB_REF_NAME}" "${COMMIT_SHORT:-unknown}" \
+            "$( [ -n "$ZIP_FILE_FOLKPATCH" ] && basename "$ZIP_FILE_FOLKPATCH" || echo none )" "$SIZE_FOLKPATCH" "$SHA256_FOLKPATCH" \
+            "$( [ -n "$ZIP_FILE_APATCH" ] && basename "$ZIP_FILE_APATCH" || echo none )" "$SIZE_APATCH" "$SHA256_APATCH" \
+            "$GOFILE_FOLKPATCH" "$GOFILE_APATCH" \
             "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
 
-          # One message per build: upload the zip with the summary as its
-          # caption. Telegram caps captions at 1024 chars (this summary is far
-          # shorter) and zip documents at 50 MB, so an oversize zip or a
-          # rejected upload falls back to a text-only message carrying the
-          # same information instead of a second message.
+          # One message per build: both zips ride in a single media group
+          # (album) under the summary caption. Telegram caps captions at 1024
+          # chars and albums around 45 MB of total media, so oversize sets
+          # fall back to the FolkPatch zip alone, then to one text message.
           SENT=0
-          if [ "$(stat -c%s "$ZIP_FILE")" -le 50000000 ]; then
-            curl -sS --max-time 600 \
+          TOTAL_BYTES=0
+          for zf in "$ZIP_FILE_APATCH" "$ZIP_FILE_FOLKPATCH"; do
+            [ -n "$zf" ] && TOTAL_BYTES=$((TOTAL_BYTES + $(stat -c%s "$zf")))
+          done
+
+          if [ -n "$ZIP_FILE_APATCH" ] && [ -n "$ZIP_FILE_FOLKPATCH" ] \
+             && [ "$TOTAL_BYTES" -le 45000000 ] \
+             && [ "$(stat -c%s "$ZIP_FILE_APATCH")" -le 50000000 ] \
+             && [ "$(stat -c%s "$ZIP_FILE_FOLKPATCH")" -le 50000000 ]; then
+            python3 - "$MESSAGE" > /tmp/tg_media.json <<'PY'
+          import json, sys
+          media = [
+              {"type": "document", "media": "attach://doc_folkpatch", "caption": sys.argv[1]},
+              {"type": "document", "media": "attach://doc_apatch"},
+          ]
+          print(json.dumps(media))
+          PY
+            curl -sS --max-time 900 \
               -F "chat_id=${CHAT_ID}" \
-              -F "document=@${ZIP_FILE}" \
-              -F "caption=${MESSAGE}" \
-              "${API}/sendDocument" > /tmp/tg_doc.json || true
-            grep -q '"ok":true' /tmp/tg_doc.json 2>/dev/null && SENT=1
+              -F "media=</tmp/tg_media.json" \
+              -F "doc_folkpatch=@${ZIP_FILE_FOLKPATCH}" \
+              -F "doc_apatch=@${ZIP_FILE_APATCH}" \
+              "${API}/sendMediaGroup" > /tmp/tg_album.json || true
+            if grep -q '"ok":true' /tmp/tg_album.json 2>/dev/null; then
+              SENT=1
+              echo "[*] Telegram media group sent as a single message"
+            else
+              echo "::warning::Telegram album upload failed - falling back to a single upload"
+            fi
           else
-            echo "::warning::Zip exceeds the Telegram 50 MB document limit - sending links only"
+            echo "::warning::Zips exceed Telegram album limits - falling back to a single upload"
+          fi
+
+          if [ "$SENT" -ne 1 ]; then
+            FALLBACK_FILE="$ZIP_FILE_FOLKPATCH"
+            [ -n "$FALLBACK_FILE" ] || FALLBACK_FILE="$ZIP_FILE_APATCH"
+            if [ -n "$FALLBACK_FILE" ] && [ "$(stat -c%s "$FALLBACK_FILE")" -le 50000000 ]; then
+              curl -sS --max-time 600 \
+                -F "chat_id=${CHAT_ID}" \
+                -F "document=@${FALLBACK_FILE}" \
+                -F "caption=${MESSAGE}" \
+                "${API}/sendDocument" > /tmp/tg_doc.json || true
+              grep -q '"ok":true' /tmp/tg_doc.json 2>/dev/null && SENT=1
+            fi
           fi
 
           if [ "$SENT" -ne 1 ]; then
@@ -292,13 +368,13 @@ jobs:
         run: |
           echo "[*] Target release: $RELEASE_TAG"
           set +e
-          OUT=$(gh release upload "$RELEASE_TAG" "${{ env.ZIP_PATH }}" --clobber -R "${{ github.repository }}" 2>&1)
+          OUT=$(gh release upload "$RELEASE_TAG" "${{ env.ZIP_PATH_APATCH }}" "${{ env.ZIP_PATH_FOLKPATCH }}" --clobber -R "${{ github.repository }}" 2>&1)
           RC=$?
           set -e
           if [ "$RC" -ne 0 ]; then
             echo "::warning::Release upload to '$RELEASE_TAG' failed: $OUT"
           else
-            echo "[*] Uploaded $(basename "${{ env.ZIP_PATH }}") to release $RELEASE_TAG"
+            echo "[*] Uploaded $(basename "${{ env.ZIP_PATH_APATCH }}") + $(basename "${{ env.ZIP_PATH_FOLKPATCH }}") to release $RELEASE_TAG"
           fi
 
       - name: Publish Tagged Release
@@ -310,10 +386,12 @@ jobs:
             --target "${{ github.sha }}" \
             --title "Pox Kernel ${{ github.ref_name }} [${{ env.EDITION }}]" \
             --notes-file release_notes.md \
-            "${{ env.ZIP_PATH }}" \
+            "${{ env.ZIP_PATH_APATCH }}" \
+            "${{ env.ZIP_PATH_FOLKPATCH }}" \
             "build/Image.gz-dtb" || \
           gh release upload "${{ github.ref_name }}" \
-            "${{ env.ZIP_PATH }}" \
+            "${{ env.ZIP_PATH_APATCH }}" \
+            "${{ env.ZIP_PATH_FOLKPATCH }}" \
             "build/Image.gz-dtb" --clobber
 
 
