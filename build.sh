@@ -62,6 +62,11 @@ if [[ -z "${VERSION_NAME:-}" ]]; then
             BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
             DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
             ;;
+        onyx-miui*|*miui*)
+            VERSION_NAME="Onyx-MIUI"
+            BRANCH_DESC="Zero Frame-Drop Gaming & MIUI Edition"
+            DEFAULT_DEFCONFIG="begonia_user_defconfig"
+            ;;
         main|granite)
             VERSION_NAME="Granite"
             BRANCH_DESC="Rock-Solid Stability Edition"

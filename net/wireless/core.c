@@ -1345,6 +1345,60 @@ static struct pernet_operations cfg80211_pernet_ops = {
 	.exit = cfg80211_pernet_exit,
 };
 
+#ifdef CONFIG_MODULES
+/* A module can go down while still owning registered wiphys, e.g. when
+ * its init failed midway and the error path did not unwind
+ * wiphy_register().  Such leftovers stay on cfg80211_rdev_list with
+ * their ops/bands pointing into module memory that is about to be
+ * freed, so the next core path to walk the list (regulatory workers,
+ * ...) would jump into freed memory.  Sweep them out before the module
+ * image goes away.
+ */
+static int cfg80211_module_notify(struct notifier_block *nb,
+				  unsigned long val, void *data)
+{
+	struct module *mod = data;
+	struct cfg80211_registered_device *rdev;
+	bool found;
+
+	if (val != MODULE_STATE_GOING)
+		return NOTIFY_DONE;
+
+	for (;;) {
+		found = false;
+
+		rtnl_lock();
+		rcu_read_lock();
+		list_for_each_entry(rdev, &cfg80211_rdev_list, list) {
+			if (__module_address((unsigned long)rdev->ops) ==
+			    mod) {
+				found = true;
+				break;
+			}
+		}
+		rcu_read_unlock();
+		rtnl_unlock();
+
+		if (!found)
+			break;
+
+		/* wiphy_unregister() takes rtnl_lock() itself, so it
+		 * cannot be called with the list locked above.  The rdev
+		 * cannot disappear in the window: only its owning module
+		 * could unregister it, and that module is already gone.
+		 */
+		wiphy_unregister(&rdev->wiphy);
+		wiphy_free(&rdev->wiphy);
+	}
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block cfg80211_module_nb = {
+	.notifier_call = cfg80211_module_notify,
+};
+#endif /* CONFIG_MODULES */
+
 static int __init cfg80211_init(void)
 {
 	int err;
@@ -1377,8 +1431,18 @@ static int __init cfg80211_init(void)
 		goto out_fail_wq;
 	}
 
+#ifdef CONFIG_MODULES
+	err = register_module_notifier(&cfg80211_module_nb);
+	if (err)
+		goto out_fail_modnot;
+#endif
+
 	return 0;
 
+#ifdef CONFIG_MODULES
+out_fail_modnot:
+	destroy_workqueue(cfg80211_wq);
+#endif
 out_fail_wq:
 	regulatory_exit();
 out_fail_reg:
@@ -1397,6 +1461,9 @@ subsys_initcall(cfg80211_init);
 
 static void __exit cfg80211_exit(void)
 {
+#ifdef CONFIG_MODULES
+	unregister_module_notifier(&cfg80211_module_nb);
+#endif
 	debugfs_remove(ieee80211_debugfs_dir);
 	nl80211_exit();
 	unregister_netdevice_notifier(&cfg80211_netdev_notifier);
