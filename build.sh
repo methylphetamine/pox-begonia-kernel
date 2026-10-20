@@ -57,7 +57,7 @@ if [[ -z "${VERSION_NAME:-}" ]]; then
             BRANCH_DESC="Zero Frame-Drop Gaming & APatch Edition"
             DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
             ;;
-        onyx-ksu-next*|*ksu-next*)
+        onyx-ksu-next*|*ksu-next*|*ksun*)
             VERSION_NAME="Onyx-KSU-Next"
             BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
             DEFAULT_DEFCONFIG="begonia_ksu_next_defconfig"
