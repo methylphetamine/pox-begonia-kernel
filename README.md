@@ -60,7 +60,7 @@
 | **GPU Complex** | Arm Mali-G76 MC4 (Bifrost Architecture) @ 800 MHz |
 | **Base Kernel** | Linux 4.14.357 LTS (arm64 / AArch64) |
 | **Partition Scheme** | A-only (`/dev/block/by-name/boot`) |
-| **Toolchain** | Google Android Clang 11.0.1 (r383902) + GCC 4.9/9.3 AArch64 Binutils |
+| **Toolchain** | TheRagingBeast TRB Clang 18.0.0 (17092023) |
 | **Packaging** | AnyKernel3 Dynamic Ramdisk Injection (osm0sis template) |
 | **Supported OS** | Android 10 (Q), Android 11 (R), Android 12/12L (S), Android 13 (T), Android 14 (U), HyperOS & AOSP |
 
