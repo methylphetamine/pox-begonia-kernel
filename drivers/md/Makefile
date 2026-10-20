@@ -35,6 +35,11 @@ obj-$(CONFIG_MD_LINEAR)		+= linear.o
 obj-$(CONFIG_MD_RAID0)		+= raid0.o
 obj-$(CONFIG_MD_RAID1)		+= raid1.o
 obj-$(CONFIG_MD_RAID10)		+= raid10.o
+ifeq ($(cc-name),clang)
+# TRB clang 18 crashes in the register coalescer when Polly processes
+# raid10_make_request(); keep this translation unit off Polly.
+CFLAGS_raid10.o += -mllvm -polly=false
+endif
 obj-$(CONFIG_MD_RAID456)	+= raid456.o
 obj-$(CONFIG_MD_MULTIPATH)	+= multipath.o
 obj-$(CONFIG_MD_FAULTY)		+= faulty.o

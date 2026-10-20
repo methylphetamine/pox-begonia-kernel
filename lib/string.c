@@ -32,6 +32,24 @@
 #include <asm/word-at-a-time.h>
 #include <asm/page.h>
 
+#ifdef CONFIG_FORTIFY_SOURCE
+/*
+ * Clang 18 can emit calls to these helpers for fortified operations it
+ * cannot resolve at compile time.  This tree only declares them with
+ * __compiletime_error, so provide the out-of-line stubs used by newer
+ * kernels to keep the final link working.
+ */
+void __read_overflow(void) { }
+EXPORT_SYMBOL(__read_overflow);
+void __read_overflow2(void) { }
+EXPORT_SYMBOL(__read_overflow2);
+void __read_overflow3(void) { }
+EXPORT_SYMBOL(__read_overflow3);
+void __write_overflow(void) { }
+EXPORT_SYMBOL(__write_overflow);
+#endif
+
+
 #ifndef __HAVE_ARCH_STRNCASECMP
 /**
  * strncasecmp - Case insensitive, length-limited string comparison
