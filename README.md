@@ -173,6 +173,8 @@ Pox Kernel is structured into modular **Rock Editions**, enabling users to pick 
 * **`watermark_scale_factor = 150`**: Initiates background `kswapd` page reclaim early, preventing direct reclaim latency spikes.
 * **`page-cluster = 0`**: Single-page swapping eliminating read-ahead penalties on compressed ZRAM.
 * **Multi-Stream ZRAM with LZ4 / ZSTD**: High-throughput compressed memory swapping.
+* **ZRAM writeback (`CONFIG_ZRAM_WRITEBACK=y`)**: Idle and incompressible pages can be moved from compressed RAM to a loop-backed file, freeing memory without touching user data.
+* **Extra I/O schedulers**: `CONFIG_IOSCHED_BFQ=y` adds BFQ alongside the existing `none`, `mq-deadline` and `kyber` blk-mq elevators. Pox Kernel Manager reads the physical UFS queue and exposes every scheduler the kernel advertises.
 
 ---
 
