@@ -41,7 +41,7 @@
 | **Base Kernel** | Linux 4.14.357 LTS (arm64 / AArch64) |
 | **Partition Scheme** | A-only (`/dev/block/by-name/boot`) |
 | **Root Compatibility** | APatch / KernelPatch ready (`CONFIG_KALLSYMS_ALL=y`), Magisk, KernelSU |
-| **Compiler Toolchain** | Google Android Clang 11.0.1 (r383902) + GCC 4.9 / 9.3 AArch64 Binutils |
+| **Compiler Toolchain** | TheRagingBeast TRB Clang 18.0.0 (17092023) |
 
 ---
 
