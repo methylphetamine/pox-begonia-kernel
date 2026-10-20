@@ -91,6 +91,11 @@ jobs:
               EDITION_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
               ROOT_INFO="KernelSU-Next v3.3.0 + NoMount VFS"
               ;;
+            onyx-miui*|*miui*)
+              EDITION="Onyx-MIUI"
+              EDITION_DESC="Zero Frame-Drop Gaming & MIUI Edition"
+              ROOT_INFO="None (Strictly Unrooted - Pure Stock Play Integrity)"
+              ;;
             onyx-kaeru*|*kaeru*)
               EDITION="Onyx-Kaeru"
               EDITION_DESC="Zero Frame-Drop Gaming & Kaeru Bootloader Edition"
@@ -205,6 +210,7 @@ jobs:
             echo "- **Download page**: $PAGE"
             echo "- **md5**: \`$LOCAL_MD5\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Notify Telegram
         continue-on-error: true
         env:
