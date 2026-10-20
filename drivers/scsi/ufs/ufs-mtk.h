@@ -213,6 +213,8 @@ enum {
 extern bool ufs_mtk_auto_hibern8_enabled;
 extern enum ufs_dbg_lvl_t ufs_mtk_dbg_lvl;
 extern struct ufs_hba *ufs_mtk_hba;
+
+extern struct ufs_hba *ufs_primary_hba;
 extern bool ufs_mtk_host_deep_stall_enable;
 extern bool ufs_mtk_host_scramble_enable;
 
