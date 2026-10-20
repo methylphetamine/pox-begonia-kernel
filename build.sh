@@ -189,6 +189,12 @@ apply_root_patches() {
 }
 
 prepare_config() {
+    # Droidspaces-OSS: merge the container support fragment before olddefconfig
+    if [[ -f "$ROOT_DIR/arch/arm64/configs/droidspaces.config" && -f "$OUT_DIR/.config" ]]; then
+        log "Merging Droidspaces config fragment..."
+        sh "$ROOT_DIR/scripts/kconfig/merge_config.sh" -m -O "$OUT_DIR" \
+            "$OUT_DIR/.config" "$ROOT_DIR/arch/arm64/configs/droidspaces.config" >/dev/null
+    fi
     local test_src="$BUILD_DIR/.tc-test.c"
     mkdir -p "$BUILD_DIR"
     printf 'int x;\n' > "$test_src"
