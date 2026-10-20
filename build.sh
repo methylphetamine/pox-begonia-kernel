@@ -57,12 +57,10 @@ if [[ -z "${VERSION_NAME:-}" ]]; then
             BRANCH_DESC="Zero Frame-Drop Gaming & APatch Edition"
             DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
             ;;
-        onyx-ksu-next*|*ksu-next*|*ksun*)
+        onyx-ksu-next*|*ksu-next*)
             VERSION_NAME="Onyx-KSU-Next"
             BRANCH_DESC="Zero Frame-Drop Gaming & KernelSU-Next Edition"
-            DEFAULT_DEFCONFIG="begonia_ksu_next_defconfig"
-            # Manager display tag: legacy line carries the 3.4.2 backports (no upstream v3.4.2-legacy tag yet)
-            export KSU_VERSION_TAG_OVERRIDE="v3.4.2-legacy"
+            DEFAULT_DEFCONFIG="begonia_apatch_defconfig"
             ;;
         onyx-miui*|*miui*)
             VERSION_NAME="Onyx-MIUI"
@@ -143,47 +141,6 @@ distclean_build() {
     log "Removing entire build directory $BUILD_DIR ..."
     rm -rf "$BUILD_DIR"
     log "Distclean complete."
-}
-
-# The KernelSU driver lives in a pristine upstream submodule. Make sure it is
-# checked out before configuring/building the tree.
-sync_submodules() {
-    [[ -f "$ROOT_DIR/.gitmodules" ]] || return 0
-    if [[ ! -f "$ROOT_DIR/KernelSU/kernel/Kbuild" ]]; then
-        log "Initializing KernelSU submodule ..."
-        git -C "$ROOT_DIR" submodule update --init --recursive
-    fi
-}
-
-# Local driver fixes cannot be committed into the pristine submodule, so they
-# are kept in ksu-patches/ and applied on top of the checkout at build time.
-# Patch paths are relative to the KernelSU submodule root.
-apply_root_patches() {
-    local patch_dir="" candidate
-    for candidate in "$ROOT_DIR/ksu-patches/$GIT_BRANCH" "$ROOT_DIR/ksu-patches/ksun"; do
-        if [[ -d "$candidate" ]]; then
-            patch_dir="$candidate"
-            break
-        fi
-    done
-    [[ -n "$patch_dir" ]] || return 0
-
-    local patch_file
-    shopt -s nullglob
-    for patch_file in "$patch_dir"/*.patch; do
-        if git -C "$ROOT_DIR" apply --directory=KernelSU --reverse \
-                --check "$patch_file" 2>/dev/null; then
-            continue   # already applied
-        fi
-        if git -C "$ROOT_DIR" apply --directory=KernelSU --check \
-                "$patch_file" 2>/dev/null; then
-            log "Applying patch $(basename "$patch_file") ..."
-            git -C "$ROOT_DIR" apply --directory=KernelSU "$patch_file" \
-                || log "WARNING: failed to apply $(basename "$patch_file")"
-        else
-            log "WARNING: $(basename "$patch_file") does not fit this tree; skipping"
-        fi
-    done
 }
 
 prepare_config() {
@@ -271,9 +228,6 @@ build_kernel() {
 
     mkdir -p "$OUT_DIR" "$BUILD_DIR"
     cd "$ROOT_DIR"
-
-    sync_submodules
-    apply_root_patches
 
     if [[ ! -f "$OUT_DIR/.config" ]]; then
         log "Configuring with $DEFCONFIG ..."
