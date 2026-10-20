@@ -19,7 +19,6 @@ on:
           - onyx-apatch
           - onyx-folkpatch
           - onyx-ksu-next
-          - onyx-resukisu
           - onyx-bakasu
           - onyx-kaeru
           - granite
@@ -86,11 +85,27 @@ jobs:
           bash kerdevdep/setup_kerdevdep.sh
           # A single branch can build any root flavor from a manual dispatch:
           # the chosen inputs are folded into GIT_BRANCH, which build.sh's
-          # resolver turns into the edition name + defconfig.
+          # resolver turns into the edition name + defconfig, and the matching
+          # patch set under variants/ is applied to the tree before building.
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             REF="${{ github.event.inputs.root }}"
             [[ "${{ github.event.inputs.miui }}" == "true" ]] && REF="${REF}-miui"
             [[ "${{ github.event.inputs.c2 }}" == "true" ]] && REF="${REF}-c2"
+
+            apply_patch() {
+              if [[ -f "variants/$1.patch" ]]; then
+                echo "::group::Applying variants/$1.patch"
+                git apply --verbose "variants/$1.patch"
+                echo "::endgroup::"
+              fi
+            }
+            case "$REF" in
+              *apatch*|*folkpatch*) apply_patch apatch ;;
+              *ksu*)                apply_patch ksun ;;
+              *bakasu*)             apply_patch bakasu ;;
+            esac
+            if [[ "$REF" == *miui* ]]; then apply_patch miui; fi
+            if [[ "$REF" == *c2* ]]; then apply_patch c2; fi
           else
             REF="${{ github.ref_name }}"
           fi

@@ -1,0 +1,3528 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 519e8f6ab6ca..9d1264969b93 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1,58 +1,126 @@
+-# Agent Rules & Repository Governance
+-
+-This document establishes the **mandatory, non-negotiable rules** for all AI agents, contributors, and automated systems working on the Pox Kernel repository (`pox-kernel-begonia`).
+-
+----
+-
+-## 1. Concurrency & Mutation Safety: NEVER Edit While a Task is Running
+-* **Absolute File Freeze**: You must **NEVER** edit, create, delete, rebase, checkout, or stage any file while a build (`build.sh`, `make`), flash (`adb sideload`), test script, benchmark, or background process is actively executing.
+-* **Corrupted Builds**: Modifying source files during compilation produces non-deterministic artifacts, broken headers, and invalid object states.
+-* **Verify Idle State**: Before calling any file modification tool, verify that all background tasks and compiler processes have exited cleanly (`exit code 0`).
+-
+----
+-
+-## 2. Anti-Spaghetti Code Standards (Kernel Quality)
+-* **Linux Kernel Coding Style**: Adhere strictly to upstream kernel conventions (`Documentation/process/coding-style.rst`):
+-  * 8-space tabs for indentation, never spaces.
+-  * Opening braces on the same line for functions/blocks following kernel standards.
+-  * Descriptive variable and symbol naming.
+-* **Minimal Targeted Diffs**: Do not touch unrelated files or perform gratuitous reformatting. Solve the exact issue with the smallest sound patch.
+-* **No rodata / Write-to-Const Panics**:
+-  * Any sysctl or kernel parameter modified by user-space or vendor HALs (such as Xiaomi's `NodeLooperThread` power HAL) must **never** be marked `const` or `const_debug`.
+-  * E.g., `sysctl_sched_migration_cost` must remain writable (`unsigned int sysctl_sched_migration_cost`), otherwise write attempts trigger an **EL1 Data Abort** panic.
+-* **Hardware & Electrical Spec Compliance**:
+-  * Standard PC USB (`STANDARD_HOST`) charging current must strictly respect the 500mA (500000 µA) USB 2.0 SDP specification.
+-  * Forcing high currents (e.g. 1.2A+) on standard PC USB collapses VBUS voltage and triggers host motherboard overcurrent protection (causing repeated USB disconnect/reconnect cycles).
+-  * High-power fast charging (3.0A / 18W) is strictly for dedicated AC wall chargers (`STANDARD_CHARGER` / DCP) and dedicated charging ports.
+-* **Linux 64-Character UTS_RELEASE Hard Limit**:
+-  * The Linux kernel enforces `UTS_RELEASE` length $\le 64$ characters.
+-  * Localversion strings must be clamped (e.g., `-Pox-1.0.0-Beta-<Edition>-<hash>`) to never exceed this limit.
+-* **Strict Branch Isolation**:
+-  * `CONFIG_SULTAN_DEBLOAT=y` is strictly exclusive to Sultan branches (`onyx-sultan*`). Never enable or leak it into standard `onyx*` branches.
+-  * APatch, KernelSU-Next, and clean unrooted branches must remain cleanly separated. Do not mix root hooks or leave broken stubs.
+-* **Zero Leftovers**: Never leave debug printk floods, scratch scripts, or ad-hoc binaries in committed code.
+-
+----
+-
+-## 3. Anti-Spaghetti Commits (Git Hygiene)
+-* **Strict Conventional Commits**:
+-  * Format: `<type>(<scope>): <imperative summary>`
+-  * Valid types: `feat`, `fix`, `refactor`, `perf`, `chore`, `docs`, `ci`.
+-  * Valid scopes: `sched`, `power`, `fs`, `build`, `sultan`, `apatch`, `ksu`, `dts`, etc.
+-  * Example: `fix(power): enforce 500mA USB SDP limit to prevent host overcurrent trip`
+-* **Atomic Commits**: Exactly one logical change per commit. Never combine build script edits, driver fixes, and defconfig updates into a single monolithic commit.
+-* **No Lazy / WIP Commits**: Commits named `fix`, `wip`, `update`, `temp`, `test`, or `patch` are strictly forbidden.
+-* **Mandatory Rationale in Commit Body**: Every commit message must include a body explaining **why** the change was made and the technical rationale.
+-* **Linear History**: Rebase cleanly on the target branch. Do not create merge commits of main into feature branches.
+-* **Bisect-Friendly**: Every single commit must compile cleanly without breaking the build.
+-
+----
+-
+-## 4. Pull Request (PR) Checklist & Quality Gates
+-Before submitting any Pull Request:
+-1. [ ] **Build Validation**: The kernel compiles completely with zero errors and zero fatal warnings using the repo toolchain.
+-2. [ ] **Packaging**: `build.sh zip` succeeds and produces a valid flashable AnyKernel3 package.
+-3. [ ] **UTS_RELEASE Check**: `include/generated/utsrelease.h` is $\le 64$ characters.
+-4. [ ] **Target Branch Verified**: The PR targets the correct branch in the 6-branch matrix (`onyx`, `onyx-apatch`, `onyx-ksu-next`, `onyx-sultan`, `onyx-sultan-apatch`, `onyx-sultan-ksu-next`).
+-5. [ ] **Clean Git History**: Commits follow Conventional Commits and contain no merge commits or WIP clutter.
+-6. [ ] **No Regression**: Hardware charging limits, boot stability, and HAL sysctls are verified.
++# AGENTS.md
++
++Repository-wide instructions for AI agents and automation working on **Pox Kernel for Redmi Note 8 Pro (begonia / MT6785)**.
++
++This file applies to the whole repository unless a nested `AGENTS.md` overrides it. Read it before making changes.
++
++## 1. Read first
++
++- `BRANCHES.md` — branch/tag architecture, release matrix, build mapping.
++- `CONTRIBUTING.md` — feature, integration, and release rules.
++- `CONFLICTS.md` — migration and integration conflict log.
++- `README.md` — minimal project/build entry point.
++
++## 2. Repository facts
++
++- Device: Xiaomi Redmi Note 8 Pro (`begonia` / `begonia_in`), MediaTek MT6785 / Helio G90T.
++- Kernel: Linux 4.14.357, arm64/AArch64.
++- Toolchain: TheRagingBeast (TRB) Clang 18, bootstrapped by `kerdevdep/setup_kerdevdep.sh`.
++- Packaging: AnyKernel3; flashable zips are written to `build/`.
++- Single long-lived base: `common/base` (code-base tag `base-v1`).
++- Features: `feature/ksun`, `feature/bakasu`, `feature/resukisu`, `feature/apatch`, `feature/miui`, `feature/c2`.
++- Releases: `release/<combo>-YYYY-MM-DD` immutable tags.
++- Archives: `archive/<name>` tags for old branch heads.
++
++## 3. Branch model — hard rules
++
++- Work from `common/base`; keep `common/base` and `feature/*` as the working refs.
++- One feature per `feature/*` branch. Do not mix root, MIUI, and C2 changes in one feature.
++- Root features own their SUSFS/NoMount bundle. Do not split SUSFS or NoMount into separate features.
++- APatch is standalone and must not receive KernelSU/SUSFS content.
++- C2-only Saikrishna patches belong only in `feature/c2`.
++- MIUI/HyperOS compatibility is WLAN-focused and must not weaken base security or performance settings.
++- Do not create long-lived `dev`, `integration`, or `test` branches.
++  - Integration branches are `test/*`, ephemeral, and must be deleted after a release tag exists.
++- Never force-push `common/base`, `release/*`, or `archive/*`.
++- Archive a branch as `archive/<name>` before deleting it. Delete old branches only with maintainer approval.
++- Keep `onyx-kaeru` unless the maintainer explicitly approves removal.
++- Do not create `feature/perf`: `common/base` already contains the WALT, crypto, BFQ, zram writeback/zstd, xswapd, and gaming performance stack.
++
++## 4. Build and release rules
++
++- Never edit, create, delete, rebase, checkout, or stage files while a build, flash, or test process is running.
++- `build.sh` auto-bootstraps `kerdevdep` on first use. Do not mutate files during that process.
++- `build.sh` selects its variant from `GIT_BRANCH`. For a detached tag, set it explicitly:
++
++```sh
++# base
++bash build.sh all
++
++# feature branch
++GIT_BRANCH=feature/ksun bash build.sh all
++
++# release tag
++GIT_BRANCH=$(git describe --tags --exact-match) bash build.sh all
++
++# explicit override
++DEFCONFIG=begonia_ksu_next_defconfig VERSION_NAME="Onyx-KSU-Next" GIT_BRANCH=feature/ksun bash build.sh all
++```
++
++- Use `build.sh all` for kernel + AnyKernel3 zip. Other actions: `kernel`, `zip`, `install`, `build-install`, `menuconfig`, `clean`, `distclean`.
++- Release tags are immutable snapshots. Never rewrite or force-push them.
++- Do not push any branch or tag until verification is complete and the maintainer approves.
++
++## 5. Verification gates
++
++Before reporting success, run and record:
++
++```sh
++bash -n build.sh
++git grep -n -E '^(<<<<<<<|>>>>>>>) ' HEAD -- .
++git diff --check base-v1..HEAD
++```
++
++Check that the selected defconfig retains the base keys and the variant keys:
++
++```sh
++git show HEAD:arch/arm64/configs/<defconfig> | grep -E \
++  'CONFIG_(SCHED_WALT|CRYPTO_AES_ARM64|IOSCHED_BFQ|ZRAM|ZRAM_WRITEBACK|CRYPTO_ZSTD|KSU|KSU_SUSFS|NOMOUNT|KALLSYMS_ALL)='
++```
++
++Rules:
++
++- `git diff --check` may report pre-existing trailing whitespace in imported root/NoMount code. That is not a conflict, but it must be documented, not hidden.
++- A full kernel build is required before claiming build success. If only static checks were run, say exactly that.
++- Never invent or infer CI, build, flash, or runtime results.
++
++## 6. Kernel quality rules
++
++- Follow upstream Linux kernel coding style. Use 8-space tabs, not spaces.
++- Make the smallest sound, targeted diff. Do not reformat or touch unrelated files.
++- Never mark a sysctl or parameter as `const` if a vendor HAL or userspace writes it. Example: `sysctl_sched_migration_cost` must remain writable, otherwise Xiaomi Power HAL writes can trigger an EL1 Data Abort panic.
++- Enforce the USB 2.0 SDP 500 mA limit on standard PC USB hosts. High current (3.0 A / 18 W) is for AC/DCP chargers only.
++- Keep `UTS_RELEASE` within the kernel's 64-character limit. Localversion strings must be clamped.
++- Keep base performance settings intact: WALT, ARMv8 crypto, BFQ tuning, zram writeback/zstd, xswapd, gaming/dynamic-fsync.
++- Leave no debug printk floods, scratch scripts, ad-hoc binaries, or broken stubs.
++
++## 7. Commit and PR rules
++
++- Use Conventional Commits: `<type>(<scope>): <imperative summary>`.
++- Valid types: `feat`, `fix`, `refactor`, `perf`, `chore`, `docs`, `ci`, `build`.
++- One logical change per commit. Avoid monolithic commits that mix drivers, configs, and CI.
++- Forbidden subjects: `fix`, `wip`, `update`, `temp`, `test`, `patch`.
++- Every non-trivial commit body must explain **why** the change is made.
++- Keep feature-branch history linear. Do not merge `common/base` into a feature branch.
++- Integration merges are only for ephemeral `test/*` branches and should use `git merge --no-ff`.
++- Log non-trivial conflict resolutions in `CONFLICTS.md`; never silently choose one side.
++- Tag a release only after the verification gates pass.
++
++PR checklist:
++
++1. [ ] Full kernel build passes with the repo toolchain.
++2. [ ] AnyKernel3 zip is produced and valid.
++3. [ ] `UTS_RELEASE` is ≤ 64 characters.
++4. [ ] Correct `feature/*` or release combination is targeted.
++5. [ ] Conventional Commits, linear history, no WIP or merge clutter.
++6. [ ] No charging, boot-stability, or HAL-sysctl regressions.
++7. [ ] Verification results are stated honestly; static-only results are labeled as such.
++
++## 8. Agent safety
++
++- Inspect existing files and user work before overwriting or deleting anything.
++- Do not delete old branches, rewrite shared history, or force-push without maintainer approval.
++- Do not push until the maintainer explicitly asks.
++- Archive before deletion and preserve `onyx-kaeru`.
++- Use `CONFLICTS.md` for any deliberate conflict resolution.
++- Prefer dedicated tools over destructive shell operations.
+diff --git a/BRANCHES.md b/BRANCHES.md
+new file mode 100644
+index 000000000000..024a4964037b
+--- /dev/null
++++ b/BRANCHES.md
+@@ -0,0 +1,128 @@
++# Branch Architecture
++
++Status: consolidation is complete **locally**. Nothing has been pushed. Verification is static only; no full kernel build or CI run has been performed.
++
++## Long-lived refs
++
++| Ref | Purpose |
++|---|---|
++| `common/base` | Single development base. Derived from `onyx`, with the dangling `drivers/kernelsu` symlink removed. Code-base tag: `base-v1`. The later documentation commit on `common/base` is metadata only; feature branches were cut from `base-v1`. |
++| `feature/ksun` | KernelSU-Next + SUSFS + NoMount. |
++| `feature/bakasu` | Bakasu root + SUSFS + NoMount. |
++| `feature/resukisu` | ReSukiSU root + SUSFS + NoMount. |
++| `feature/apatch` | APatch/FolkPatch build wiring + NoMount. |
++| `feature/miui` | MIUI/HyperOS WLAN compatibility. |
++| `feature/c2` | MT6785 vcodec/VCU and C2 media stack. |
++| `release/*` | Immutable release tags. No long-lived integration branches. |
++| `archive/*` | Snapshots of superseded or source branches, retained before any branch deletion. |
++
++## Base invariants
++
++`common/base` keeps the `onyx` performance work:
++
++- WALT and the tuned PELT half-life.
++- ARMv8 crypto extensions and hardware acceleration.
++- BFQ with the onyx tuning, zram writeback, and zstd.
++- xswapd and gaming-mode/dynamic-fsync behavior.
++- TRB Clang 18 via `kerdevdep/setup_kerdevdep.sh`.
++
++Feature branches must not remove those settings. Several imported root branches originally carried older `begonia_user_defconfig` states that disabled WALT or crypto; those regressions were reverted so the feature branches keep the base configuration.
++
++## Features
++
++| Branch | Source | Scope | Notes |
++|---|---|---|---|
++| `feature/ksun` | `onyx-ksu-next` | `KernelSU` gitlink, `drivers/kernelsu` symlink, SUSFS, NoMount, KSU patches | `build.sh` recognizes `feature/ksun`; recursive submodules are required. |
++| `feature/bakasu` | `onyx-bakasu` | In-tree `drivers/kernelsu`, SUSFS, NoMount | Bakasu defconfig keeps WALT/crypto/BFQ/zram. |
++| `feature/resukisu` | `onyx-resukisu` | In-tree `drivers/kernelsu`, SUSFS, NoMount | Uses `resukisu_defconfig`. |
++| `feature/apatch` | `onyx-apatch` | APatch/FolkPatch build wiring, NoMount | No KernelSU/SUSFS stack. |
++| `feature/miui` | `onyx-miui` | MIUI/HyperOS WLAN compatibility | Five-file scope: WLAN driver/adaptor, `net/wireless/core.c`, workflow, build script. |
++| `feature/c2` | `onyx-c2-ksun` | MT6785 vcodec/VCU, C2 media, cpufreq and PMIC changes | C2-only. No root, NoMount, SUSFS, or MIUI files. |
++
++SUSFS and NoMount are deliberately bundled with the root feature that consumes them. They are not separate features. Sultan/APatch build flavor wiring is likewise part of the APatch feature rather than a separate branch.
++
++## What was intentionally not made a feature
++
++- `feature/perf` was not created. `onyx` already contains the WALT, crypto, BFQ, zram writeback/zstd, xswapd, and gaming work. The apparent BFQ/zram changes in `main`/`granite`/`obsidian` are older states that would revert onyx tuning (for example BFQ slice-idle values and zram defaults), not additive improvements.
++- `main`, `granite`, `obsidian`, `hos3-fix`, and `onyx-kaeru` are treated as superseded/archive sources. `onyx-kaeru` has been retained as requested. Their heads are preserved as `archive/<name>` tags.
++- C2 Saikrishna commits are included only in C2 content. The recent C2 cherry-picks were empty or redundant against the local C2 media stack, so no Saikrishna-only changes were added to non-C2 features.
++
++## Release tags
++
++| Tag | Defconfig | Contents |
++|---|---|---|
++| `release/onyx-ksu-next-2026-10-20` | `begonia_ksu_next_defconfig` | KernelSU-Next + SUSFS + NoMount |
++| `release/onyx-c2-ksu-next-2026-10-20` | `begonia_ksu_next_defconfig` | C2 + KernelSU-Next + SUSFS + NoMount |
++| `release/onyx-miui-ksu-next-2026-10-20` | `begonia_ksu_next_defconfig` | MIUI/HyperOS + KernelSU-Next + SUSFS + NoMount |
++| `release/onyx-miui-bakasu-2026-10-20` | `bakasu_defconfig` | MIUI/HyperOS + Bakasu + SUSFS + NoMount |
++| `release/onyx-c2-bakasu-2026-10-20` | `bakasu_defconfig` | C2 + Bakasu + SUSFS + NoMount |
++| `release/onyx-apatch-2026-10-20` | `begonia_apatch_defconfig` | APatch/FolkPatch + NoMount |
++
++A separate `aosp-ksun-susfs` tag is unnecessary because SUSFS is already inside `feature/ksun`.
++
++## Building
++
++`build.sh` chooses its variant from `GIT_BRANCH`. On a detached tag, pass the tag name explicitly:
++
++```sh
++GIT_BRANCH=$(git describe --tags --exact-match) bash build.sh
++```
++
++or:
++
++```sh
++GIT_BRANCH=release/onyx-ksu-next-2026-10-20 bash build.sh
++GIT_BRANCH=release/onyx-miui-bakasu-2026-10-20 bash build.sh
++```
++
++For feature work:
++
++```sh
++GIT_BRANCH=feature/ksun bash build.sh
++GIT_BRANCH=feature/c2 bash build.sh
++```
++
++`build.sh` recognizes the `feature/*` names and the `release/<edition>-<date>` tags directly, including combined editions such as `release/onyx-c2-ksu-next-*`. `DEFCONFIG`, `VERSION_NAME`, `PACKAGE_NAME`, and `EXTRA_FLAGS` can be overridden explicitly if the branch/tag name is not part of the normal matrix. If the branch asks for a feature defconfig that is absent from the current checkout, `build.sh` warns and falls back to `begonia_user_defconfig` instead of failing in kconfig.
++
++### Build metadata and mirrors
++
++Every packaged build writes `build/build-info.env` and `build/build-info.json`
++(edition, branch, commit, defconfig, sizes, sha256/md5). CI sources this file
++instead of re-deriving artifact identity from the branch name.
++
++```sh
++./build.sh info          # print the metadata for the latest artifact
++./build.sh gofile        # mirror to Gofile   (GOFILE_TOKEN / GOFILE_FOLDER_ID optional)
++./build.sh pixeldrain    # mirror to PixelDrain (PIXELDRAIN_API_KEY required)
++./build.sh upload        # best-effort mirror to every configured provider
++```
++
++Mirror results are written to `build/gofile.env` and `build/pixeldrain.env`.
++
++### Kernel identity
++
++`uname -r` shows the short, stable release `4.14.357-Pox`. The full
++edition-qualified identity (`4.14.357-Pox-<version>-<edition>`) is kept as the
++extended version and shown in the build log, the flashable `CHANGELOG.txt`, the
++installer banner, and `build-info.env` as `LOCALVERSION_EXTENDED`. The builder
++banner is `POX@poxproject`. The commit id is excluded from both version strings
++(`CONFIG_LOCALVERSION_AUTO` is disabled during configuration); it is still
++recorded in the build metadata, the changelog, and the `<commit>.zip` link.
++
++`LOCALVERSION` overrides the short string, and `EXTENDED_LOCALVERSION` overrides
++the extended one.
++
++## Verification and cleanup state
++
++Static checks passed on every release combination:
++
++- `bash -n build.sh`.
++- No conflict markers.
++- Base config keys retained: WALT, ARMv8 crypto, BFQ, zram, zram writeback, zstd.
++- Variant keys present: KernelSU/SUSFS/NoMount or APatch/NoMount as applicable.
++- Feature isolation checked by changed-file scope.
++- TRB Clang 18 bootstrap present.
++- `git diff --check` reports only pre-existing trailing whitespace in imported root/NoMount code (not conflict markers).
++- An upstream fetch on 2026-10-20 confirmed the upstream branch tips were unchanged since the audit; it added upstream release tags only.
++
++The six ephemeral `test/*` integration branches were deleted after their release tags were created. Old branches are still present locally and have `archive/*` tags; they have not been deleted pending final approval. No push has been done.
+diff --git a/CONFLICTS.md b/CONFLICTS.md
+new file mode 100644
+index 000000000000..043e7db385a3
+--- /dev/null
++++ b/CONFLICTS.md
+@@ -0,0 +1,52 @@
++# Conflict Log
++
++Consolidation date: 2026-10-20. This file records migration and integration conflicts. A recorded resolution is intentional; it was not applied silently.
++
++## C2 Saikrishna cherry-picks
++
++The local C2 media stack already contained the relevant Saikrishna changes. The recent commits were therefore empty, redundant, or resolved in favor of the local PoX C2 logic. No Saikrishna-only change was copied into a non-C2 feature.
++
++| Commit | Subject | Result |
++|---|---|---|
++| `ef187181c` | `media: mtk-vcodec: Port VCU and V4L2 vcodec driver for Codec2` | Conflict in `drivers/media/platform/mtk-vcodec/mtk_vcodec_dec.c`. The local stack has an extra guard in `vb2ops_vdec_stop_streaming()`: `if (dst_buf->state != VB2_BUF_STATE_ACTIVE) continue;`. The guard was preserved. The resulting cherry-pick was empty and was skipped. |
++| `a17a72d86` | Same vcodec port, sibling commit | Empty against the local C2 stack; skipped. |
++| `92f1a67bd` | C2 cpufreq change | Empty against the local C2 stack; skipped. |
++| `03fe2ea85` | `media: mtk-vcodec: mt6785: Release MMQoS frequency request when idle` | Conflicts in `mtk_vcodec_dec_pm.c` and `mtk_vcodec_enc_pm.c`. The local PoX anti-lag DVFS logic already releases MMQoS when idle and additionally holds warm clocks during active playback. Local logic was kept; the incoming patch was redundant and the cherry-pick was skipped. |
++| `17057c3d7` | C2 PMIC change | Empty against the local C2 stack; skipped. |
++
++Sibling/duplicate commits `e50f4bc1d`, `87a5b2975`, and `8ef08bda1` were not applied separately. `e50f4bc1d` has the same patch ID as `17057c3d7`, and `87a5b2975` has the same patch ID as `92f1a67bd`; the remaining sibling was redundant with the already-present C2 content.
++
++The C2 content is nevertheless present in `feature/c2` and in the C2 release tags. The cherry-pick history is empty because the local C2 stack was already at or ahead of those patches.
++
++## Integration merges
++
++The following ephemeral combinations were merged with `git merge --no-ff`:
++
++- AOSP + KernelSU-Next
++- AOSP + APatch
++- C2 + KernelSU-Next
++- C2 + Bakasu
++- MIUI + KernelSU-Next
++- MIUI + Bakasu
++
++All six merges completed automatically. A later MIUI configuration cleanup was merged into the two MIUI combinations; it only restored base `begonia_user_defconfig` and `begonia_apatch_defconfig` values. No conflict markers remain in any release tag.
++
++## Configuration regressions corrected during migration
++
++The imported root branches were based on older `onyx` states and several carried defconfig changes that would have disabled base functionality. These were corrected before release tagging:
++
++- `feature/ksun`: restored base `begonia_user_defconfig` and the dynamic-fsync behavior in `gaming_mode.c`.
++- `feature/resukisu`: restored base `begonia_user_defconfig`.
++- `feature/apatch`: restored base `begonia_user_defconfig`.
++- `feature/miui`: restored base security/performance values in the user and APatch defconfigs; kept only the WLAN compatibility changes plus the MIUI version/build wiring.
++- `feature/ksun`: added a `feature/ksun` build-script alias so the branch selects `begonia_ksu_next_defconfig`; restored the executable mode of `build.sh`.
++
++## Whitespace and non-conflicts
++
++`git diff --check` reports trailing whitespace in imported SUSFS/NoMount/root code. These are pre-existing whitespace issues, not conflict markers. Warning-line counts observed on the integration tips were:
++
++- KernelSU-Next combinations: 56 lines.
++- Bakasu combinations: 240 lines.
++- APatch: 14 lines.
++
++No actual `<<<<<<< ` or `>>>>>>> ` markers were found. No full kernel build was run, so this log does not claim a compile or runtime result.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+new file mode 100644
+index 000000000000..985360b32da1
+--- /dev/null
++++ b/CONTRIBUTING.md
+@@ -0,0 +1,89 @@
++# Contributing
++
++This repository uses a small, tag-based integration model rather than long-lived integration branches.
++
++## Branch model
++
++- Start feature work from `common/base`.
++- Keep one feature per `feature/*` branch. Do not mix root, MIUI, and C2 changes in one feature branch.
++- Do not create permanent `dev`, `integration`, or `test` branches. Integration branches are ephemeral and must be replaced by `release/*` tags.
++- Never force-push `common/base`, `release/*`, or `archive/*`.
++- Archive the source head as `archive/<name>` before deleting any old branch.
++- Do not push a consolidation or release ref until the diff, configuration, and build story have been checked.
++
++## Feature rules
++
++1. Keep the base performance stack intact: WALT, ARMv8 crypto, BFQ tuning, zram writeback/zstd, xswapd, and gaming/dynamic-fsync behavior.
++2. Do not copy an older full-tree state over `common/base`. Apply the smallest path-limited change that provides the feature.
++3. Root features own their SUSFS/NoMount bundle. Do not split SUSFS or NoMount into separate features.
++4. APatch is its own root/build feature. Do not add KernelSU/SUSFS content to it.
++5. C2-only patches belong in `feature/c2`; do not add them to non-C2 features.
++6. MIUI/HyperOS compatibility is WLAN-focused. It must not weaken base security or performance configuration without an explicit, documented reason.
++7. If a feature needs a new build variant, update `build.sh` so the feature branch name itself selects the correct defconfig.
++
++## Integration and release
++
++Use an ephemeral branch only for validation:
++
++```sh
++git switch -c test/<combo> common/base
++git merge --no-ff feature/<name> -m "test: integrate <name>"
++```
++
++Resolve conflicts deliberately. Record every non-trivial resolution in `CONFLICTS.md`; do not silently choose one side. Then run the static checklist:
++
++```sh
++bash -n build.sh
++git grep -n -E '^(<<<<<<<|>>>>>>>) ' HEAD -- .
++git diff --check common/base..HEAD
++```
++
++`git diff --check` may report trailing whitespace in imported root/NoMount code. That is not a conflict, but it must be documented rather than hidden.
++
++Check the selected defconfig for the base keys and the feature keys:
++
++```sh
++git show HEAD:arch/arm64/configs/<defconfig> | grep -E 'CONFIG_(SCHED_WALT|CRYPTO_AES_ARM64|IOSCHED_BFQ|ZRAM|ZRAM_WRITEBACK|CRYPTO_ZSTD|KSU|KSU_SUSFS|NOMOUNT|KALLSYMS_ALL)='
++```
++
++When the combination passes, create an immutable annotated tag:
++
++```sh
++git tag -a release/<combo>-YYYY-MM-DD <commit> -m "Release <combo>"
++```
++
++Then delete the ephemeral `test/*` branch. Do not keep it as a long-lived branch.
++
++## Building
++
++`build.sh` derives the variant from `GIT_BRANCH`. For a detached tag, set it explicitly:
++
++```sh
++GIT_BRANCH=$(git describe --tags --exact-match) bash build.sh
++```
++
++If the branch name is outside the normal matrix:
++
++```sh
++GIT_BRANCH=feature/<name> DEFCONFIG=<defconfig> VERSION_NAME="<name>" bash build.sh
++```
++
++## Commit style
++
++Use a scoped subject such as:
++
++```text
++feat(ksun): import KernelSU-Next + SUSFS + NoMount stack
++fix(miui): keep base security and performance config
++build(ksun): recognize feature/ksun branch name
++```
++
++Explain source branches and intentional omissions in the body when a feature is squashed from an unrelated history. Do not claim a build or runtime test that was not performed.
++
++## Cleanup and archive policy
++
++- `common/base` and `feature/*` are the working refs.
++- `release/*` tags are immutable release snapshots.
++- `archive/<name>` tags preserve old branch heads.
++- Keep `onyx-kaeru` unless the maintainer explicitly approves its removal.
++- Delete old branches only after their archive tag exists, and only with maintainer approval.
+diff --git a/README.md b/README.md
+index 799690af2e53..cf4b38e51339 100644
+--- a/README.md
++++ b/README.md
+@@ -1,329 +1,60 @@
+-# Pox Kernel for Redmi Note 8 Pro (begonia) 🇵🇸 #FreePalestine
++# Pox Kernel — Redmi Note 8 Pro (`begonia`)
+ 
+-[![GitHub Repo](https://img.shields.io/badge/GitHub-POX--project%2Fpox--begonia--kernel-181717.svg?logo=github)](https://github.com/POX-project/pox-begonia-kernel)
+-[![Kernel Version](https://img.shields.io/badge/Kernel-Linux%204.14.357-green.svg?logo=linux)](https://github.com/POX-project/pox-begonia-kernel)
+-[![Pox Release](https://img.shields.io/badge/Pox%20Release-v1.0.0--Beta-blue.svg)](https://github.com/POX-project/pox-begonia-kernel)
+-[![Device](https://img.shields.io/badge/Device-Redmi%20Note%208%20Pro%20(begonia)-orange.svg?logo=xiaomi)](https://github.com/POX-project/pox-begonia-kernel)
+-[![SoC](https://img.shields.io/badge/SoC-MediaTek%20Helio%20G90T%20(MT6785)-red.svg)](https://github.com/POX-project/pox-begonia-kernel)
+-[![Solidarity](https://img.shields.io/badge/Stand%20With-Free%20Palestine%20🇵🇸-red?style=flat&colorA=000000&colorB=007A3D)](https://en.wikipedia.org/wiki/State_of_Palestine)
+-[![Maintainer](https://img.shields.io/badge/Maintainer-TXO%20R-purple.svg)](https://github.com/txorav)
+-[![License](https://img.shields.io/badge/License-GPLv2-yellow.svg)](COPYING)
++Custom Linux 4.14.357 kernel for the Xiaomi Redmi Note 8 Pro / MT6785 (Helio G90T), built with TRB Clang 18 and packaged as an AnyKernel3 zip.
+ 
+-**Pox Kernel** is an advanced, rock-solid custom Linux kernel engineered for the **Xiaomi Redmi Note 8 Pro** (`begonia` / `begonia_in`, MediaTek MT6785 / Helio G90T).
++- Working repository: <https://github.com/methylphetamine/pox-begonia-kernel>
++- Upstream project: <https://github.com/POX-project/pox-begonia-kernel>
++- Documentation: [`BRANCHES.md`](BRANCHES.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`AGENTS.md`](AGENTS.md), [`CONFLICTS.md`](CONFLICTS.md)
+ 
+-> *"We aim for stability, not for anything else."* — **Stand for Justice. Free Palestine 🇵🇸**
++## Branch model
+ 
+----
++- `common/base` — single base branch (onyx performance stack + TRB Clang 18)
++- `feature/*` — orthogonal features: `ksun`, `bakasu`, `resukisu`, `apatch`, `miui`, `c2`
++- `release/*` — immutable release tags
++- `archive/*` — archived old branch heads
+ 
+-> [!CAUTION]
+-> ### ⚠️ Critical Disclaimer & Legacy Version Advisory
+-> * **Older Versions (< 1.0.0-Beta / v0.9 & Prior) are OLD & TESTING ONLY**: All releases prior to **1.0.0-Beta** (including v0.9 and earlier tags) are strictly classified as **OLD, DEPRECATED, AND FOR HISTORICAL / TESTING PURPOSES ONLY**. They lack essential hardware overcurrent protection, stability hotfixes, and vendor HAL data abort immunizations.
+-> * **NO LIABILITY / WARRANTY DISCLAIMER**: We are **NOT responsible** for anything that happens to you, your device, bricked motherboards, hardware brownouts, bootloops, data loss, or failed alarms. You flash completely at your own risk.
+-> * **FOLLOW MAINLINE**: For daily driving and stability, always **follow mainline** and only install active supported releases from the current branch matrix (`onyx`, `onyx-sultan-apatch`, etc.). Never flash obsolete, unmaintained legacy builds.
++SUSFS and NoMount are bundled with the root feature that consumes them. See [`BRANCHES.md`](BRANCHES.md) for the full matrix.
+ 
+----
++## Features
+ 
+-## Table of Contents
++- Base: WALT/EAS, ARMv8 crypto acceleration, BFQ, zram writeback + zstd, xswapd, gaming/dynamic-fsync behavior.
++- Root options: KernelSU-Next, Bakasu, ReSukiSU, APatch.
++- Device options: MIUI/HyperOS WLAN compatibility; C2 MT6785 vcodec/VCU media stack.
+ 
+-- [Overview & Hardware Specifications](#overview--hardware-specifications)
+-- [Release Evolution: 0.9 Legacy to 1.0.0-Beta Mainline](#release-evolution-09-legacy-to-100-beta-mainline)
+-  - [Version 0.9 (Legacy / Testing Only - Deprecated)](#1-version-09-legacy--testing-only---deprecated)
+-  - [Version 1.0.0-Beta (Mainline / Active Supported)](#2-version-100-beta-mainline--active-supported)
+-- [Rock Editions & The 6-Branch Matrix](#rock-editions--the-6-branch-matrix)
+-- [Comprehensive Kernel Addons & Features](#comprehensive-kernel-addons--features)
+-  - [1. Universal Filesystem & Storage Engine](#1-universal-filesystem--storage-engine)
+-  - [2. Fast Charging & Power Subsystem](#2-fast-charging--power-subsystem)
+-  - [3. Zero Frame-Drop Gaming & Sched Engine](#3-zero-frame-drop-gaming--sched-engine)
+-  - [4. Sultan Debloat Architecture](#4-sultan-debloat-architecture)
+-  - [5. Hardware Crash & Stability Immunizations](#5-hardware-crash--stability-immunizations)
+-  - [6. Multi-Flavored Root Ecosystem](#6-multi-flavored-root-ecosystem)
+-  - [7. Memory & I/O Compression Engine](#7-memory--io-compression-engine)
+-- [Branch Architecture Matrix](#branch-architecture-matrix)
+-- [Installation Guide](#installation-guide)
+-- [On-Device Verification](#on-device-verification)
+-- [Building from Source](#building-from-source)
+-- [Repository Governance & Agent Hard Rules](#repository-governance--agent-hard-rules)
+-- [Project Roadmap & TODO](#project-roadmap--todo)
+-- [Credits & Acknowledgments](#credits--acknowledgments)
+-- [Solidarity & Free Palestine](#solidarity--free-palestine)
+-- [License](#license)
++## Build
+ 
+----
++`build.sh` bootstraps the pinned TRB Clang 18 toolchain via `kerdevdep` on first run. Output goes to `build/`.
+ 
+-## Overview & Hardware Specifications
++```sh
++# base
++bash build.sh all
+ 
+-| Component | Target Specification |
+-|:---|:---|
+-| **Device Model** | Xiaomi Redmi Note 8 Pro (`begonia` Global / `begonia_in` India) |
+-| **SoC** | MediaTek MT6785 (Helio G90T, 12nm FinFET architecture) |
+-| **CPU Complex** | Octa-Core: 2x Arm Cortex-A76 @ 2.05 GHz + 6x Arm Cortex-A55 @ 2.00 GHz |
+-| **GPU Complex** | Arm Mali-G76 MC4 (Bifrost Architecture) @ 800 MHz |
+-| **Base Kernel** | Linux 4.14.357 LTS (arm64 / AArch64) |
+-| **Partition Scheme** | A-only (`/dev/block/by-name/boot`) |
+-| **Toolchain** | TheRagingBeast TRB Clang 18.0.0 (17092023) |
+-| **Packaging** | AnyKernel3 Dynamic Ramdisk Injection (osm0sis template) |
+-| **Supported OS** | Android 10 (Q), Android 11 (R), Android 12/12L (S), Android 13 (T), Android 14 (U), HyperOS & AOSP |
++# feature branch
++GIT_BRANCH=feature/ksun bash build.sh all
+ 
+----
+-
+-## Release Evolution: 0.9 Legacy to 1.0.0-Beta Mainline
+-
+-### 1. Version 0.9 (Legacy / Testing Only - Deprecated)
+-> **STATUS: OBSOLETE & TESTING ONLY.** Do not use for daily driving. Follow mainline.
+-
+-The 0.9 series introduced the initial prototype Rock Editions:
+-* **Granite (0.9 LTS)**: Foundational hardware crash mitigation (UVLO call brownouts, SCP SensorHub deep-sleep watchdog).
+-* **Obsidian (0.9 iOS-Memory)**: Proactive `watermark_scale_factor = 150`, `page-cluster = 0` ZRAM tuning, and asynchronous memory compaction.
+-* **Onyx (0.9 Gaming)**: First unified gaming mode controller (`/proc/perfmgr/gaming_mode`), 500μs Schedutil frequency ramps, and FPSGO V3 frame rescue.
+-
+-*Known 0.9 Limitations*: Lacks universal filesystem backports, lacks safe PC USB SDP power limits, and lacks the EL1 Data Abort fix on `sysctl_sched_migration_cost`.
+-
+----
+-
+-### 2. Version 1.0.0-Beta (Mainline / Active Supported)
+-> **STATUS: CURRENT RECOMMENDED MAINLINE RELEASE.**
+-
+-The 1.0.0-Beta release upgrades Pox Kernel into a modern downstream distribution across the confirmed 6-branch matrix:
+-* **Universal Filesystem Engine**: Integrated EROFS, modernized F2FS with rapid garbage collection, Btrfs with ZSTD compression and subvolumes, native NTFS (read/write), exFAT, and FAT32.
+-* **18W Fast Charging + Safe 500mA PC USB**: Full Pump Express 2.0 (PE+ 2.0) 3.0A/18W fast charging on AC wall adapters with strict 500mA PC USB SDP enforcement to protect host motherboards and maintain rock-solid ADB connectivity.
+-* **HAL Panic Immunization**: Fully resolved Xiaomi Power HAL EL1 Data Abort crash by ensuring `sysctl_sched_migration_cost` remains writable in userspace.
+-* **Sultan Debloat Architecture**: Optional zero-telemetry, zero-logging-jitter editions on dedicated `onyx-sultan*` branches.
+-* **Enforced Linux 64-Char UTS_RELEASE**: Dynamically clamped localversion strings in `build.sh` preventing string overflow build failures.
+-* **Anti-Spaghetti Repository Governance**: Strict [`AGENTS.md`](AGENTS.md) rules enforcing zero-mutation during builds, atomic Conventional Commits, and clean PR quality gates.
+-
+----
+-
+-## Rock Editions & The 6-Branch Matrix
+-
+-Pox Kernel is structured into modular **Rock Editions**, enabling users to pick the exact balance between stock-clean stability, aggressive debloat, and root hooking engines:
++# release tag
++GIT_BRANCH=$(git describe --tags --exact-match) bash build.sh all
+ 
++# explicit override
++DEFCONFIG=begonia_ksu_next_defconfig VERSION_NAME="Onyx-KSU-Next" GIT_BRANCH=feature/ksun bash build.sh all
+ ```
+-                          ┌─────────────────────────────┐
+-                          │   Pox Kernel (MT6785)       │
+-                          │   "We aim for stability"    │
+-                          └──────────────┬──────────────┘
+-                                         │
+-        ┌────────────────────────────────┼────────────────────────────────┐
+-        ▼                                ▼                                ▼
+- ┌──────────────┐                 ┌──────────────┐                 ┌──────────────┐
+- │   GRANITE    │                 │   OBSIDIAN   │                 │     ONYX     │
+- │  (Stability) │                 │ (iOS Memory) │                 │   (Gaming)   │
+- └──────┬───────┘                 └──────┬───────┘                 └──────┬───────┘
+-        │                                │                                │
+-        ├─ UVLO Call Brownout Fix        ├─ iOS Memory Engine             ├─ Unified Gaming Mode
+-        ├─ SCP Watchdog Fix              ├─ Watermark Scale 150           ├─ FPSGO Ultra-Rescue
+-        ├─ PPM Throttling Fix            ├─ Page Cluster 0 (0ns)          ├─ Mali Touch Boost
+-        └─ APatch KALLSYMS               └─ Multi-Stream LZ4/ZSTD         └─ 500us Schedutil
+-                                                                          │
+-                                         ┌────────────────────────────────┴────────────────────────────────┐
+-                                         ▼                                                                 ▼
+-                                  ┌──────────────┐                                                  ┌──────────────┐
+-                                  │  ONYX ROOT   │                                                  │ ONYX SULTAN  │
+-                                  │   FLAVORS    │                                                  │   DEBLOAT    │
+-                                  └──────┬───────┘                                                  └──────┬───────┘
+-                                         │                                                                 │
+-                                         ├─ onyx (Clean Unrooted)                                          ├─ onyx-sultan (Debloated Clean)
+-                                         ├─ onyx-apatch (APatch Ready)                                     ├─ onyx-sultan-apatch (Debloat + APatch)
+-                                         └─ onyx-ksu-next (KernelSU-Next)                                  └─ onyx-sultan-ksu-next (Debloat + KSU)
+-```
+-
+----
+-
+-## Comprehensive Kernel Addons & Features
+-
+-### 1. Universal Filesystem & Storage Engine
+-* **EROFS (Enhanced Read-Only File System)**: Full native support for high-compression system/vendor images with instantaneous page decompression.
+-* **Modern F2FS (Flash-Friendly File System)**: Backported upstream optimizations, rapid discard background garbage collection, and inline extent caching.
+-* **Btrfs Integration**: Full in-kernel Btrfs support with transparent ZSTD compression, snapshot subvolumes, and asynchronous chunk allocation.
+-* **Comprehensive Removable Media Formats**: Built-in support for ext4, ext3, ext2, FAT32/vfat, exFAT, native NTFS (read/write), XFS, ISO9660, UDF (optical/disc media), FUSE, and OverlayFS.
+-
+-### 2. Fast Charging & Power Subsystem
+-* **18W Fast Charging Engine**: Enabled MediaTek Pump Express (PE+ 2.0) with up to 3.0A / 3.2A high-speed fast charging on AC wall adapters (`STANDARD_CHARGER` / DCP) with thermal safety guards.
+-* **Safe PC USB SDP Current Clamping**: Strict compliance with the USB 2.0 Standard Downstream Port specification (500mA / 500000 µA limit on PC data ports). Prevents host motherboard xHCI overcurrent tripping, eliminating USB dropouts during ADB debugging and file transfers.
+-* **Dynamic MIVR (Minimum Input Voltage Regulation)**: Active monitoring to prevent cable voltage collapse on weak chargers.
+ 
+-### 3. Zero Frame-Drop Gaming & Sched Engine
+-* **Unified Kernel Gaming Mode Controller**: Exposed sysfs interface at `/proc/perfmgr/gaming_mode`:
+-  * `0`: Normal everyday balanced governor.
+-  * `1`: Gaming mode with aggressive frequency hold and tight frame deadlines.
+-  * `2`: Extreme mode with locked DRAM bandwidth (2133 MHz) and touch boost latency zeroing.
+-* **MediaTek FPSGO V3 Ultra-Rescue**: Preemptive frame deadline intervention (`rescue_percent = 20%`, variance sensitivity = 15) to prevent stutter during complex 3D scenes.
+-* **Mali-G76 MC4 Instant Touch Boost**: Immediate clock frequency ramping on touch screen input interrupts, combined with a 20% proactive dynamic performance margin (`DYNAMIC_MARGIN_MODE_PERF`).
+-* **500μs Schedutil Governor Frequency Ramp**: Reduced scheduler clock ramp intervals from 2000μs down to 500μs with 20ms anti-jitter hold-down.
++Other actions: `kernel`, `zip`, `install`, `build-install`, `menuconfig`, `clean`, `distclean`.
+ 
+-### 4. Sultan Debloat Architecture (`CONFIG_SULTAN_DEBLOAT=y`)
+-* **Strict Branch Isolation**: Exclusively active on `onyx-sultan*` branches to ensure pure, unadulterated stock behavior on standard `onyx*`.
+-* **Zero Overhead Logging**: Eliminates unnecessary console lock acquisition and string formatting overhead for non-critical kernel logs (`vprintk_emit` filter).
+-* **Stripped Vendor Spyware & Tracing**: Strips heavy diagnostic hooks, AEE exception recorders, and redundant debug overhead, unlocking higher FPS consistency and superior battery longevity.
++## Releases
+ 
+-### 5. Hardware Crash & Stability Immunizations
+-* **Xiaomi Power HAL `sysctl_sched_migration_cost` Data Abort Fix**: Removed `const_debug` qualifier from `sysctl_sched_migration_cost` in `fair.c` and `sched.h`. Prevents fatal **EL1 Data Abort** kernel panics when Xiaomi's power HAL (`NodeLooperThread`) writes to procfs.
+-* **Hardware UVLO Battery Collapse Prevention**: Resolves sudden `2sec_reboot` brownouts during high-current operations (voice calls on 2G/3G/4G with battery < 15%).
+-* **SCP SensorHub Watchdog Protection**: Fixes MT6785 nanohub ringbuffer timeouts during deep sleep.
+-* **PPM Low-Battery Throttling Bypass**: Prevents severe UI freezing when battery capacity drops below 10%.
+-* **Linux 64-Character UTS_RELEASE Guard**: Dynamically clamped localversion strings in `build.sh` to strictly obey the Linux kernel 64-character limit.
++Current consolidated release tags are dated `2026-10-20` (for example `release/onyx-ksu-next-2026-10-20`, `release/onyx-miui-bakasu-2026-10-20`). See [`BRANCHES.md`](BRANCHES.md) for their defconfigs.
+ 
+-### 6. Multi-Flavored Root Ecosystem
+-* **APatch / KernelPatch**: Full `CONFIG_KALLSYMS_ALL=y` symbol exposure with SELinux hook points.
+-* **KernelSU-Next**: Integrated KernelSU-Next v3.3.0 driver with NoMount VFS support for stealth systemless root.
+-* **Clean Unrooted**: 100% stock security model with zero hooking modifications for strict banking/Play Integrity compliance.
++Legacy `0.9` and earlier tags are historical and deprecated. Use the current release tags.
+ 
+-### 7. Memory & I/O Compression Engine
+-* **iOS-Style Asynchronous RAM Management**: On-demand page compaction keeping foreground interactive tasks lag-free.
+-* **`watermark_scale_factor = 150`**: Initiates background `kswapd` page reclaim early, preventing direct reclaim latency spikes.
+-* **`page-cluster = 0`**: Single-page swapping eliminating read-ahead penalties on compressed ZRAM.
+-* **Multi-Stream ZRAM with LZ4 / ZSTD**: High-throughput compressed memory swapping.
++## Flash
+ 
+----
++Flash the AnyKernel3 zip from `build/` using a recovery, kernel manager, or:
+ 
+-## Branch Architecture Matrix
+-
+-| Branch | Edition | Sultan Debloat | Root Subsystem | Description |
+-|:---|:---|:---:|:---:|:---|
+-| **`onyx`** | Onyx | ❌ | Clean (Unrooted) | Clean gaming kernel, zero root hooks, pure Play Integrity ready |
+-| **`onyx-apatch`** | Onyx-APatch | ❌ | APatch / KernelPatch | Onyx Gaming + Full KALLSYMS symbol table for APatch |
+-| **`onyx-ksu-next`** | Onyx-KSU-Next | ❌ | KernelSU-Next v3.3.0 | Onyx Gaming + Native KernelSU-Next driver & NoMount VFS |
+-| **`onyx-sultan`** | Onyx-Sultan | ✅ | Clean (Unrooted) | Sultan debloat + Onyx Gaming, pure unrooted edition |
+-| **`onyx-sultan-apatch`** | Onyx-Sultan-APatch | ✅ | APatch / KernelPatch | Sultan debloat + Onyx Gaming + APatch root support |
+-| **`onyx-sultan-ksu-next`** | Onyx-Sultan-KSU-Next | ✅ | KernelSU-Next v3.3.0 | Sultan debloat + Onyx Gaming + KernelSU-Next v3.3.0 |
+-| **`main` / `granite`** | Granite | ❌ | APatch Ready | Long-term stability branch with hardware safety fixes |
+-| **`obsidian`** | Obsidian | ❌ | APatch Ready | Granite + iOS compressed memory tuning |
+-| **`onyx-kaeru`** | Onyx-Kaeru | ❌ | APatch / Kaeru | Merged DTB support for Kaeru custom bootloader |
+-
+----
+-
+-## Installation Guide
+-
+-### Prerequisites
+-1. Redmi Note 8 Pro (`begonia` / `begonia_in`) with an **unlocked bootloader**.
+-2. Custom Recovery installed (TWRP, OrangeFox, or PBRP).
+-3. The AnyKernel3 flashable `.zip` corresponding to your preferred branch.
+-
+-### Flashing via Recovery Sideload (Recommended)
+-```bash
+-# 1. Boot device into TWRP Recovery
+-adb reboot recovery
+-
+-# 2. Enter Sideload mode on the device
+-adb shell twrp sideload
+-
+-# 3. Stream and install the kernel zip
+-adb sideload Pox-1.0.0-Beta-Onyx-Sultan-APatch-<commit>-begonia.zip
+-
+-# 4. Reboot system
+-adb reboot
++```sh
++bash build.sh install
+ ```
+ 
+----
+-
+-## On-Device Verification
+-
+-Once booted, open a terminal or run ADB shell:
+-
+-```bash
+-# 1. Verify kernel release string
+-uname -a
+-# Expected: Linux localhost 4.14.357-Pox-1.0.0-Beta-...
+-
+-# 2. Check gaming mode status
+-cat /proc/perfmgr/gaming_mode
+-
+-# 3. Check fast charge state
+-cat /sys/devices/platform/charger/fast_charge 2>/dev/null || cat /proc/perfmgr/gaming_mode
+-```
+-
+----
+-
+-## Building from Source
+-
+-Pox Kernel includes a completely self-contained build environment:
+-
+-```bash
+-# Clone the repository from official POX-project
+-git clone https://github.com/POX-project/pox-begonia-kernel.git
+-cd pox-begonia-kernel
+-
+-# Checkout the desired branch
+-git checkout onyx-sultan-apatch
+-
+-# Compile kernel Image.gz-dtb
+-./build.sh kernel
+-
+-# Package the AnyKernel3 flashable zip
+-./build.sh zip
+-
+-# Compile and package in one step
+-./build.sh
+-```
+-
+----
+-
+-## Repository Governance & Agent Hard Rules
+-
+-To maintain absolute code quality and prevent regressions, all AI agents and contributors must strictly obey the governance guidelines defined in [`AGENTS.md`](AGENTS.md):
+-
+-1. **Zero-Mutation Rule**: NEVER edit or stage files while a build, test, or flashing command is actively running.
+-2. **Anti-Spaghetti Code**: Clean, minimal diffs; standard Linux kernel coding conventions (8-space tabs); no `.rodata` writes on sysctl handlers; standard 500mA PC USB SDP limits.
+-3. **Anti-Spaghetti Commits**: Strict Conventional Commits (`<type>(<scope>): <summary>`), atomic bisectable changes, with comprehensive technical explanation in the commit body.
+-4. **Strict Branch Isolation**: Never leak `CONFIG_SULTAN_DEBLOAT` into regular `onyx*` branches. Maintain pure boundaries between root flavors.
+-
+----
+-
+-## Project Roadmap & TODO
+-
+-- [x] **v0.9 Release**: Granite, Obsidian, and Onyx initial stable rollout.
+-- [x] **1.0.0-Beta Core Architecture**: Universal filesystem engine (EROFS, F2FS, Btrfs, NTFS, exFAT).
+-- [x] **18W Fast Charging Engine**: AC charger current boost with safe PC USB 500mA compliance.
+-- [x] **HAL Panic Fix**: Elimination of EL1 data abort on `sysctl_sched_migration_cost`.
+-- [x] **Agent Governance**: Strict anti-spaghetti rules and automated quality gates in `AGENTS.md`.
+-- [x] **POX-project Remote Migration**: Upstream repository forked and synced to `POX-project/pox-begonia-kernel`.
+-- [ ] **Complete 6-Branch Matrix Builds**: Build and package official 1.0.0-Beta releases across all 6 targets:
+-  - [x] `onyx-sultan-apatch`
+-  - [ ] `onyx-apatch`
+-  - [ ] `onyx-ksu-next`
+-  - [ ] `onyx`
+-  - [ ] `onyx-sultan`
+-  - [ ] `onyx-sultan-ksu-next`
+-- [ ] **Comparative Benchmark Report**: Full on-device 5-minute Perfetto traces and benchmark comparison between v0.9 baseline and 1.0.0-Beta.
+-- [ ] **Network & Wi-Fi Zero-Jitter**: Wi-Fi SetCAM latency tuning and TCP BBR v2 upstream backports.
+-- [ ] **Automated GitHub Actions CI**: Automated multi-branch build pipeline with release artifact generation.
+-
+----
+-
+-## Credits & Acknowledgments
+-
+-* **Lead Developer & Maintainer**: **TXO R (Pox Project)** ([@txorav](https://github.com/txorav))
+-* **Linux Kernel Community**: Linus Torvalds and downstream LTS maintainers.
+-* **MediaTek**: Board support packages and Helio G90T hardware drivers.
+-* **osm0sis @ XDA**: AnyKernel3 template and flash tools.
+-* **Sultan Alsawaf (kerneltoast)**: Kernel debloating insights and low-overhead design.
+-* **Begonia Community**: Testers, developers, and users keeping the Redmi Note 8 Pro thriving.
+-
+----
+-
+-## Solidarity & Free Palestine 🇵🇸
+-
+-We believe that open-source software and technology should stand for human dignity, justice, and the freedom of all oppressed peoples. 
+-
+-```
+-   ████████████████████████████████████████████
+-   ████████████████████████████████████████████  (Black)
+-   ████████████████████████████████████████████
+-   ████████████████████████████████████████████
+-   ████████████████████████████████████████████  (White)
+-   ████████████████████████████████████████████
+-   ████████████████████████████████████████████
+-   ████████████████████████████████████████████  (Green)
+-   ████████████████████████████████████████████
+-          ▲ (Red Triangle on Hoist)
+-```
+-
+-> **"Injustice anywhere is a threat to justice everywhere."**  
+-> We stand in solidarity with the Palestinian people in their struggle for self-determination, freedom, and human rights.  
+-> **Free Palestine. End the occupation. Peace, justice, and liberty for all.** 🇵🇸
+-
+----
+-
+-## License
++## Disclaimer
+ 
+-Pox Kernel is free software distributed under the terms of the **GNU General Public License version 2 (GPL-2.0)** as published by the Free Software Foundation. See [`COPYING`](COPYING) for complete details.
++Flashing a custom kernel is at your own risk. This project is licensed under GPLv2; see [`COPYING`](COPYING).
+diff --git a/arch/arm64/configs/begonia_apatch_defconfig b/arch/arm64/configs/begonia_apatch_defconfig
+index ab2af2f80662..3e14991d22a6 100644
+--- a/arch/arm64/configs/begonia_apatch_defconfig
++++ b/arch/arm64/configs/begonia_apatch_defconfig
+@@ -106,7 +106,7 @@ CONFIG_HIGH_RES_TIMERS=y
+ CONFIG_TICK_CPU_ACCOUNTING=y
+ # CONFIG_VIRT_CPU_ACCOUNTING_GEN is not set
+ # CONFIG_IRQ_TIME_ACCOUNTING is not set
+-# CONFIG_SCHED_WALT is not set
++CONFIG_SCHED_WALT=y
+ # CONFIG_BSD_PROCESS_ACCT is not set
+ CONFIG_TASKSTATS=y
+ CONFIG_TASK_DELAY_ACCT=y
+@@ -355,7 +355,7 @@ CONFIG_BLK_INLINE_ENCRYPTION_FALLBACK=y
+ #
+ # Partition Types
+ #
+-# CONFIG_PARTITION_ADVANCED is not set
++CONFIG_PARTITION_ADVANCED=y
+ CONFIG_MSDOS_PARTITION=y
+ CONFIG_EFI_PARTITION=y
+ CONFIG_BLOCK_COMPAT=y
+@@ -1117,7 +1117,7 @@ CONFIG_NET_CLS_ACT=y
+ # CONFIG_NET_CLS_IND is not set
+ CONFIG_NET_SCH_FIFO=y
+ # CONFIG_DCB is not set
+-# CONFIG_DNS_RESOLVER is not set
++CONFIG_DNS_RESOLVER=y
+ # CONFIG_BATMAN_ADV is not set
+ # CONFIG_OPENVSWITCH is not set
+ # CONFIG_VSOCKETS is not set
+@@ -1260,7 +1260,7 @@ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_LOOP_MIN_COUNT=16
+ # CONFIG_BLK_DEV_CRYPTOLOOP is not set
+ # CONFIG_BLK_DEV_DRBD is not set
+-# CONFIG_BLK_DEV_NBD is not set
++CONFIG_BLK_DEV_NBD=y
+ CONFIG_BLK_DEV_RAM=y
+ CONFIG_BLK_DEV_RAM_COUNT=16
+ CONFIG_BLK_DEV_RAM_SIZE=4096
+@@ -2002,8 +2002,8 @@ CONFIG_SCSI_PROC_FS=y
+ CONFIG_BLK_DEV_SD=y
+ # CONFIG_CHR_DEV_ST is not set
+ # CONFIG_CHR_DEV_OSST is not set
+-# CONFIG_BLK_DEV_SR is not set
+-# CONFIG_CHR_DEV_SG is not set
++CONFIG_BLK_DEV_SR=y
++CONFIG_CHR_DEV_SG=y
+ # CONFIG_CHR_DEV_SCH is not set
+ # CONFIG_SCSI_CONSTANTS is not set
+ # CONFIG_SCSI_LOGGING is not set
+@@ -2036,7 +2036,7 @@ CONFIG_SCSI_UFS_CRYPTO=y
+ CONFIG_HAVE_PATA_PLATFORM=y
+ # CONFIG_ATA is not set
+ CONFIG_MD=y
+-# CONFIG_BLK_DEV_MD is not set
++CONFIG_BLK_DEV_MD=y
+ # CONFIG_BCACHE is not set
+ CONFIG_BLK_DEV_DM_BUILTIN=y
+ CONFIG_BLK_DEV_DM=y
+@@ -3485,7 +3485,7 @@ CONFIG_USB_WDM=y
+ #
+ CONFIG_USB_STORAGE=y
+ # CONFIG_USB_STORAGE_DEBUG is not set
+-# CONFIG_USB_STORAGE_REALTEK is not set
++CONFIG_USB_STORAGE_REALTEK=y
+ CONFIG_USB_STORAGE_DATAFAB=y
+ CONFIG_USB_STORAGE_FREECOM=y
+ CONFIG_USB_STORAGE_ISD200=y
+@@ -3497,8 +3497,8 @@ CONFIG_USB_STORAGE_ALAUDA=y
+ CONFIG_USB_STORAGE_ONETOUCH=y
+ CONFIG_USB_STORAGE_KARMA=y
+ CONFIG_USB_STORAGE_CYPRESS_ATACB=y
+-# CONFIG_USB_STORAGE_ENE_UB6250 is not set
+-# CONFIG_USB_UAS is not set
++CONFIG_USB_STORAGE_ENE_UB6250=y
++CONFIG_USB_UAS=y
+ 
+ #
+ # USB Imaging devices
+@@ -4559,13 +4559,13 @@ CONFIG_EXT4_FS_ENCRYPTION=y
+ CONFIG_JBD2=y
+ # CONFIG_JBD2_DEBUG is not set
+ CONFIG_FS_MBCACHE=y
+-# CONFIG_REISERFS_FS is not set
+-# CONFIG_JFS_FS is not set
+-# CONFIG_XFS_FS is not set
++CONFIG_REISERFS_FS=y
++CONFIG_JFS_FS=y
++CONFIG_XFS_FS=y
+ # CONFIG_GFS2_FS is not set
+ # CONFIG_OCFS2_FS is not set
+-# CONFIG_BTRFS_FS is not set
+-# CONFIG_NILFS2_FS is not set
++CONFIG_BTRFS_FS=y
++CONFIG_NILFS2_FS=y
+ CONFIG_F2FS_FS=y
+ CONFIG_F2FS_STAT_FS=y
+ CONFIG_F2FS_FS_XATTR=y
+@@ -4574,7 +4574,7 @@ CONFIG_F2FS_FS_SECURITY=y
+ # CONFIG_F2FS_CHECK_FS is not set
+ CONFIG_F2FS_FS_ENCRYPTION=y
+ # CONFIG_F2FS_FAULT_INJECTION is not set
+-# CONFIG_F2FS_FS_COMPRESSION is not set
++CONFIG_F2FS_FS_COMPRESSION=y
+ # CONFIG_FS_DAX is not set
+ CONFIG_FS_POSIX_ACL=y
+ CONFIG_EXPORTFS=y
+@@ -4599,7 +4599,7 @@ CONFIG_QUOTA_TREE=y
+ # CONFIG_QFMT_V1 is not set
+ CONFIG_QFMT_V2=y
+ CONFIG_QUOTACTL=y
+-# CONFIG_AUTOFS4_FS is not set
++CONFIG_AUTOFS4_FS=y
+ CONFIG_FUSE_FS=y
+ # CONFIG_CUSE is not set
+ CONFIG_OVERLAY_FS=y
+@@ -4619,7 +4619,7 @@ CONFIG_INCREMENTAL_FS=y
+ CONFIG_ISO9660_FS=y
+ CONFIG_JOLIET=y
+ CONFIG_ZISOFS=y
+-# CONFIG_UDF_FS is not set
++CONFIG_UDF_FS=y
+ 
+ #
+ # DOS/FAT/NT Filesystems
+@@ -4628,8 +4628,8 @@ CONFIG_FAT_FS=y
+ CONFIG_MSDOS_FS=y
+ CONFIG_VFAT_FS=y
+ CONFIG_FAT_DEFAULT_CODEPAGE=437
+-CONFIG_FAT_DEFAULT_IOCHARSET="iso8859-1"
+-# CONFIG_FAT_DEFAULT_UTF8 is not set
++CONFIG_FAT_DEFAULT_IOCHARSET="utf8"
++CONFIG_FAT_DEFAULT_UTF8=y
+ CONFIG_EXFAT_FS=y
+ CONFIG_EXFAT_DEFAULT_IOCHARSET="utf8"
+ CONFIG_NTFS_FS=y
+@@ -4657,24 +4657,24 @@ CONFIG_ARCH_HAS_GIGANTIC_PAGE=y
+ CONFIG_CONFIGFS_FS=y
+ CONFIG_MISC_FILESYSTEMS=y
+ # CONFIG_ORANGEFS_FS is not set
+-# CONFIG_ADFS_FS is not set
+-# CONFIG_AFFS_FS is not set
+-# CONFIG_ECRYPT_FS is not set
++CONFIG_ADFS_FS=y
++CONFIG_AFFS_FS=y
++CONFIG_ECRYPT_FS=y
+ CONFIG_SDCARD_FS=y
+-# CONFIG_HFS_FS is not set
+-# CONFIG_HFSPLUS_FS is not set
+-# CONFIG_BEFS_FS is not set
+-# CONFIG_BFS_FS is not set
+-# CONFIG_EFS_FS is not set
+-# CONFIG_CRAMFS is not set
+-# CONFIG_SQUASHFS is not set
+-# CONFIG_VXFS_FS is not set
+-# CONFIG_MINIX_FS is not set
+-# CONFIG_OMFS_FS is not set
+-# CONFIG_HPFS_FS is not set
+-# CONFIG_QNX4FS_FS is not set
+-# CONFIG_QNX6FS_FS is not set
+-# CONFIG_ROMFS_FS is not set
++CONFIG_HFS_FS=y
++CONFIG_HFSPLUS_FS=y
++CONFIG_BEFS_FS=y
++CONFIG_BFS_FS=y
++CONFIG_EFS_FS=y
++CONFIG_CRAMFS=y
++CONFIG_SQUASHFS=y
++CONFIG_VXFS_FS=y
++CONFIG_MINIX_FS=y
++CONFIG_OMFS_FS=y
++CONFIG_HPFS_FS=y
++CONFIG_QNX4FS_FS=y
++CONFIG_QNX6FS_FS=y
++CONFIG_ROMFS_FS=y
+ CONFIG_PSTORE=y
+ CONFIG_PSTORE_ZLIB_COMPRESS=y
+ # CONFIG_PSTORE_LZO_COMPRESS is not set
+@@ -4682,59 +4682,59 @@ CONFIG_PSTORE_ZLIB_COMPRESS=y
+ CONFIG_PSTORE_CONSOLE=y
+ CONFIG_PSTORE_PMSG=y
+ CONFIG_PSTORE_RAM=y
+-# CONFIG_SYSV_FS is not set
+-# CONFIG_UFS_FS is not set
+-# CONFIG_NETWORK_FILESYSTEMS is not set
++CONFIG_SYSV_FS=y
++CONFIG_UFS_FS=y
++CONFIG_NETWORK_FILESYSTEMS=y
+ CONFIG_NLS=y
+-CONFIG_NLS_DEFAULT="iso8859-1"
++CONFIG_NLS_DEFAULT="utf8"
+ CONFIG_NLS_CODEPAGE_437=y
+-# CONFIG_NLS_CODEPAGE_737 is not set
+-# CONFIG_NLS_CODEPAGE_775 is not set
+-# CONFIG_NLS_CODEPAGE_850 is not set
+-# CONFIG_NLS_CODEPAGE_852 is not set
+-# CONFIG_NLS_CODEPAGE_855 is not set
+-# CONFIG_NLS_CODEPAGE_857 is not set
+-# CONFIG_NLS_CODEPAGE_860 is not set
+-# CONFIG_NLS_CODEPAGE_861 is not set
+-# CONFIG_NLS_CODEPAGE_862 is not set
+-# CONFIG_NLS_CODEPAGE_863 is not set
+-# CONFIG_NLS_CODEPAGE_864 is not set
+-# CONFIG_NLS_CODEPAGE_865 is not set
+-# CONFIG_NLS_CODEPAGE_866 is not set
+-# CONFIG_NLS_CODEPAGE_869 is not set
+-# CONFIG_NLS_CODEPAGE_936 is not set
++CONFIG_NLS_CODEPAGE_737=y
++CONFIG_NLS_CODEPAGE_775=y
++CONFIG_NLS_CODEPAGE_850=y
++CONFIG_NLS_CODEPAGE_852=y
++CONFIG_NLS_CODEPAGE_855=y
++CONFIG_NLS_CODEPAGE_857=y
++CONFIG_NLS_CODEPAGE_860=y
++CONFIG_NLS_CODEPAGE_861=y
++CONFIG_NLS_CODEPAGE_862=y
++CONFIG_NLS_CODEPAGE_863=y
++CONFIG_NLS_CODEPAGE_864=y
++CONFIG_NLS_CODEPAGE_865=y
++CONFIG_NLS_CODEPAGE_866=y
++CONFIG_NLS_CODEPAGE_869=y
++CONFIG_NLS_CODEPAGE_936=y
+ CONFIG_NLS_CODEPAGE_950=y
+-# CONFIG_NLS_CODEPAGE_932 is not set
+-# CONFIG_NLS_CODEPAGE_949 is not set
+-# CONFIG_NLS_CODEPAGE_874 is not set
+-# CONFIG_NLS_ISO8859_8 is not set
+-# CONFIG_NLS_CODEPAGE_1250 is not set
+-# CONFIG_NLS_CODEPAGE_1251 is not set
++CONFIG_NLS_CODEPAGE_932=y
++CONFIG_NLS_CODEPAGE_949=y
++CONFIG_NLS_CODEPAGE_874=y
++CONFIG_NLS_ISO8859_8=y
++CONFIG_NLS_CODEPAGE_1250=y
++CONFIG_NLS_CODEPAGE_1251=y
+ CONFIG_NLS_ASCII=y
+ CONFIG_NLS_ISO8859_1=y
+-# CONFIG_NLS_ISO8859_2 is not set
+-# CONFIG_NLS_ISO8859_3 is not set
+-# CONFIG_NLS_ISO8859_4 is not set
+-# CONFIG_NLS_ISO8859_5 is not set
+-# CONFIG_NLS_ISO8859_6 is not set
+-# CONFIG_NLS_ISO8859_7 is not set
+-# CONFIG_NLS_ISO8859_9 is not set
+-# CONFIG_NLS_ISO8859_13 is not set
+-# CONFIG_NLS_ISO8859_14 is not set
+-# CONFIG_NLS_ISO8859_15 is not set
+-# CONFIG_NLS_KOI8_R is not set
+-# CONFIG_NLS_KOI8_U is not set
+-# CONFIG_NLS_MAC_ROMAN is not set
+-# CONFIG_NLS_MAC_CELTIC is not set
+-# CONFIG_NLS_MAC_CENTEURO is not set
+-# CONFIG_NLS_MAC_CROATIAN is not set
+-# CONFIG_NLS_MAC_CYRILLIC is not set
+-# CONFIG_NLS_MAC_GAELIC is not set
+-# CONFIG_NLS_MAC_GREEK is not set
+-# CONFIG_NLS_MAC_ICELAND is not set
+-# CONFIG_NLS_MAC_INUIT is not set
+-# CONFIG_NLS_MAC_ROMANIAN is not set
+-# CONFIG_NLS_MAC_TURKISH is not set
++CONFIG_NLS_ISO8859_2=y
++CONFIG_NLS_ISO8859_3=y
++CONFIG_NLS_ISO8859_4=y
++CONFIG_NLS_ISO8859_5=y
++CONFIG_NLS_ISO8859_6=y
++CONFIG_NLS_ISO8859_7=y
++CONFIG_NLS_ISO8859_9=y
++CONFIG_NLS_ISO8859_13=y
++CONFIG_NLS_ISO8859_14=y
++CONFIG_NLS_ISO8859_15=y
++CONFIG_NLS_KOI8_R=y
++CONFIG_NLS_KOI8_U=y
++CONFIG_NLS_MAC_ROMAN=y
++CONFIG_NLS_MAC_CELTIC=y
++CONFIG_NLS_MAC_CENTEURO=y
++CONFIG_NLS_MAC_CROATIAN=y
++CONFIG_NLS_MAC_CYRILLIC=y
++CONFIG_NLS_MAC_GAELIC=y
++CONFIG_NLS_MAC_GREEK=y
++CONFIG_NLS_MAC_ICELAND=y
++CONFIG_NLS_MAC_INUIT=y
++CONFIG_NLS_MAC_ROMANIAN=y
++CONFIG_NLS_MAC_TURKISH=y
+ CONFIG_NLS_UTF8=y
+ # CONFIG_DLM is not set
+ # CONFIG_UNICODE is not set
+@@ -5089,7 +5089,7 @@ CONFIG_CRYPTO_CRC32=y
+ CONFIG_CRYPTO_CRCT10DIF=y
+ CONFIG_CRYPTO_GHASH=y
+ CONFIG_CRYPTO_POLY1305=y
+-# CONFIG_CRYPTO_MD4 is not set
++CONFIG_CRYPTO_MD4=y
+ CONFIG_CRYPTO_MD5=y
+ # CONFIG_CRYPTO_MICHAEL_MIC is not set
+ # CONFIG_CRYPTO_RMD128 is not set
+@@ -5259,3 +5259,67 @@ CONFIG_ARCH_HAS_SG_CHAIN=y
+ CONFIG_SBITMAP=y
+ # CONFIG_STRING_SELFTEST is not set
+ CONFIG_HWCONF_MANAGER=y
++CONFIG_BTRFS_FS_POSIX_ACL=y
++# CONFIG_BTRFS_FS_CHECK_INTEGRITY is not set
++CONFIG_XFS_POSIX_ACL=y
++CONFIG_XFS_RT=y
++CONFIG_HFSPLUS_FS_POSIX_ACL=y
++CONFIG_SQUASHFS_FILE_DIRECT=y
++CONFIG_SQUASHFS_DECOMP_MULTI=y
++CONFIG_SQUASHFS_XATTR=y
++CONFIG_SQUASHFS_ZLIB=y
++CONFIG_SQUASHFS_LZ4=y
++CONFIG_SQUASHFS_LZO=y
++CONFIG_SQUASHFS_XZ=y
++CONFIG_SQUASHFS_ZSTD=y
++CONFIG_SQUASHFS_4K_DEVBLK_SIZE=y
++CONFIG_F2FS_FS_LZO=y
++CONFIG_F2FS_FS_LZ4=y
++CONFIG_F2FS_FS_ZSTD=y
++CONFIG_MAC_PARTITION=y
++CONFIG_BSD_DISKLABEL=y
++CONFIG_SOLARIS_X86_PARTITION=y
++CONFIG_MINIX_SUBPARTITION=y
++CONFIG_LDM_PARTITION=y
++CONFIG_AMIGA_PARTITION=y
++CONFIG_ATARI_PARTITION=y
++CONFIG_RAID6_PQ=y
++CONFIG_XOR_BLOCKS=y
++CONFIG_ACORN_PARTITION=y
++CONFIG_AIX_PARTITION=y
++CONFIG_OSF_PARTITION=y
++CONFIG_UNIXWARE_DISKLABEL=y
++CONFIG_SGI_PARTITION=y
++CONFIG_SUN_PARTITION=y
++CONFIG_KARMA_PARTITION=y
++CONFIG_SYSV68_PARTITION=y
++CONFIG_REALTEK_AUTOPM=y
++CONFIG_MD_AUTODETECT=y
++CONFIG_MD_LINEAR=y
++CONFIG_MD_RAID0=y
++CONFIG_MD_RAID1=y
++CONFIG_MD_RAID10=y
++CONFIG_MD_RAID456=y
++CONFIG_JFS_POSIX_ACL=y
++CONFIG_JFS_SECURITY=y
++CONFIG_REISERFS_FS_XATTR=y
++CONFIG_REISERFS_FS_POSIX_ACL=y
++CONFIG_REISERFS_FS_SECURITY=y
++CONFIG_EROFS_FS_XATTR=y
++CONFIG_EROFS_FS_POSIX_ACL=y
++CONFIG_EROFS_FS_SECURITY=y
++CONFIG_ROMFS_BACKED_BY_BOTH=y
++CONFIG_UFS_FS_WRITE=y
++CONFIG_ADFS_FS_RW=y
++CONFIG_ECRYPT_FS_MESSAGING=y
++CONFIG_CIFS=y
++CONFIG_CIFS_STATS=y
++CONFIG_CIFS_UPCALL=y
++CONFIG_CIFS_XATTR=y
++CONFIG_CIFS_POSIX=y
++CONFIG_CIFS_ACL=y
++CONFIG_CIFS_SMB311=y
++CONFIG_NFS_FS=y
++CONFIG_NFS_V3=y
++CONFIG_NFS_V4=y
++CONFIG_NOMOUNT=y
+diff --git a/drivers/kernelsu b/drivers/kernelsu
+deleted file mode 120000
+index 9e51d0d62734..000000000000
+--- a/drivers/kernelsu
++++ /dev/null
+@@ -1 +0,0 @@
+-../KernelSU/kernel
+\ No newline at end of file
+diff --git a/fs/Kconfig b/fs/Kconfig
+index 479dc5549bc4..53bca47ff554 100644
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -314,5 +314,6 @@ endif # NETWORK_FILESYSTEMS
+ source "fs/nls/Kconfig"
+ source "fs/dlm/Kconfig"
+ source "fs/unicode/Kconfig"
++source "fs/nomount/Kconfig"
+ 
+ endmenu
+diff --git a/fs/Makefile b/fs/Makefile
+index ce39020c8992..e58007042a03 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -140,3 +140,4 @@ obj-$(CONFIG_CEPH_FS)		+= ceph/
+ obj-$(CONFIG_PSTORE)		+= pstore/
+ obj-$(CONFIG_EFIVAR_FS)		+= efivarfs/
+ obj-$(CONFIG_EROFS_FS)		+= erofs/
++obj-$(CONFIG_NOMOUNT)		+= nomount/
+diff --git a/fs/nomount/Kconfig b/fs/nomount/Kconfig
+new file mode 100644
+index 000000000000..638b9427ef63
+--- /dev/null
++++ b/fs/nomount/Kconfig
+@@ -0,0 +1,8 @@
++# Kconfig for NoMount
++
++config NOMOUNT
++	tristate "NoMount Path Redirection Subsystem"
++	default y
++	help
++	  NoMount allows path redirection and virtual file injection
++	  without mounting filesystems. Useful for systemless modifications.
+diff --git a/fs/nomount/Makefile b/fs/nomount/Makefile
+new file mode 100644
+index 000000000000..35710cda1711
+--- /dev/null
++++ b/fs/nomount/Makefile
+@@ -0,0 +1,21 @@
++# Makefile for NoMount
++
++ifeq ($(filter /%,$(src)),)
++NM_REAL_PATH := $(realpath $(srctree)/$(src))
++else
++NM_REAL_PATH := $(realpath $(src))
++endif
++
++NOMOUNT_COMMITS := $(shell \
++    d='$(NM_REAL_PATH)'; \
++    while [ -n "$$d" ] && [ "$$d" != "/" ] && [ ! -d "$$d/.git" ]; do d=$$(dirname "$$d"); done; \
++    if [ -d "$$d/.git" ] && git -C "$$d" remote get-url origin 2>/dev/null | grep -q 'nomount'; then \
++        git -C "$$d" rev-list --count HEAD 2>/dev/null; \
++    fi)
++
++ifneq ($(NOMOUNT_COMMITS),)
++ccflags-y += -DNOMOUNT_COMMIT_COUNT=\"$(NOMOUNT_COMMITS)\"
++endif
++
++obj-$(CONFIG_NOMOUNT) += nomount.o
++ccflags-y += -std=gnu11 -Wno-declaration-after-statement -O3 -fno-stack-protector
+diff --git a/fs/nomount/nomount.c b/fs/nomount/nomount.c
+new file mode 100644
+index 000000000000..e698b2a93fbd
+--- /dev/null
++++ b/fs/nomount/nomount.c
+@@ -0,0 +1,1802 @@
++#include <linux/init.h>
++#include <linux/fs.h>
++#include <linux/file.h>
++#include <linux/namei.h>
++#include <linux/cred.h>
++#include <linux/xattr.h>
++#include <linux/module.h>
++#include "nomount.h"
++
++/*** Helpers ***/
++
++static bool nm_block_isolated_uids = false;
++static __always_inline bool nomount_is_uid_blocked(uid_t target_uid)
++{
++    struct nm_uid_array *arr;
++
++    if (unlikely(READ_ONCE(nm_block_isolated_uids))) {
++        uid_t app_id = target_uid % 100000U;
++        if (app_id >= 90000U && app_id <= 99999U) return true;
++    }
++
++    if (likely(!rcu_access_pointer(nomount_uids)))
++        return false;
++
++    rcu_guard();
++    if ((arr = rcu_dereference(nomount_uids)) && nm_uid_bloom_test(arr, target_uid)) {
++        for (int i = 0; i < arr->count; i++) {
++            if (arr->uids[i] == target_uid)
++                return true;
++        }
++    }
++    return false;
++}
++
++static __always_inline bool nm_child_matches(struct nomount_leaf *leaf, const char *name, size_t len)
++{
++    if (unlikely(!leaf || leaf->child_len != len)) return false;
++    const char *child_name = nm_get_child_name(leaf);
++    return child_name[0] == name[0] && child_name[len - 1] == name[len - 1] && !memcmp(child_name, name, len);
++}
++
++static __always_inline struct nomount_leaf *nomount_bsearch_child(struct nomount_child_array *arr, const char *name, size_t len, u32 hash, int *index)
++{
++	struct nm_child *entries = nm_entries(arr);
++	int l = 0, n = arr->count;
++
++	while (n > 0) {
++		int step = n >> 1, m = l + step, less = (entries[m].hash < hash), mask = -less;
++		l += (step + 1) & mask;
++		n = step + ((n - (step << 1) - 1) & mask);
++    }
++	if (index) *index = l;
++	while (l < arr->count && entries[l].hash == hash) {
++		struct nomount_leaf *leaf = entries[l].leaf;
++		if (nm_child_matches(leaf, name, len)) {
++			if (index) *index = l;
++			return leaf;
++		}
++		l++;
++	}
++	return NULL;
++}
++
++static struct nm_rule *nm_select_rule(struct nomount_leaf *leaf, unsigned int uid)
++{
++    struct nm_rule_array *arr = rcu_dereference_check(leaf->rules, lockdep_is_held(&nomount_mutex));
++    struct nm_rule *fallback = NULL;
++    if (!arr) return NULL;
++    for (int i = 0; i < arr->count; i++) {
++        struct nm_rule *r = &arr->rules[i];
++        if (r->target_uid == uid) return r;
++        if (!r->target_uid) fallback = r;
++        if (r->target_uid > uid) break;
++    }
++    return fallback;
++}
++
++static struct nm_rule *nm_lookup_rule(struct nomount_dir_node *dir_node, const char *name, size_t len, uid_t fsuid, struct nomount_leaf **leaf_out)
++{
++    struct nomount_child_array *children;
++    struct nomount_leaf *leaf = NULL;
++    struct nm_rule *rule = NULL;
++
++    if (likely((children = rcu_dereference(dir_node->children)))) {
++        u32 bloom_h = nm_qhash(name, len);
++        if (!children->bloom_words) {
++            struct nm_child *entries = nm_entries(children);
++            for (int i = 0; i < children->count; i++) {
++                if (entries[i].bloom_hash == bloom_h && nm_child_matches(entries[i].leaf, name, len)) {
++                    leaf = entries[i].leaf;
++                    break;
++                }
++            }
++        } else if (unlikely(nm_bloom_test(children, bloom_h))) {
++            u32 hash = full_name_hash((const void *)(unsigned long)NOMOUNT_MAGIC_SIG, name, len);
++            leaf = nomount_bsearch_child(children, name, len, hash, NULL);
++        }
++    }
++    if (leaf) rule = nm_select_rule(leaf, fsuid);
++    if (rule && leaf_out) *leaf_out = leaf;
++    return rule;
++}
++
++static bool nm_resolve_rule(struct nomount_dir_node *dir_node, const char *name, size_t len, uid_t fsuid, struct nm_rule_info *out)
++{
++    struct nomount_leaf *leaf = NULL;
++    struct nm_rule *rule;
++
++    rcu_guard();
++    rule = nm_lookup_rule(dir_node, name, len, fsuid, &leaf);
++    if (rule) {
++        out->flags = rule->flags;
++        out->v_ino = leaf->v_ino;
++        out->r_path = rule->r_path;
++        out->this_dir = (rule->flags & NM_FLAG_IS_DIR) ? leaf->this_dir : NULL;
++        if (out->r_path.dentry) path_get(&out->r_path);
++        if (out->this_dir) atomic_inc(&out->this_dir->refs);
++        return true;
++    }
++    return false;
++}
++
++static void nm_dir_rcu_free(struct rcu_head *head)
++{
++    struct nomount_dir_node *dir = container_of(head, struct nomount_dir_node, rcu);
++    if (dir->pinned_dentry) dput(dir->pinned_dentry);
++    kfree(rcu_dereference_raw(dir->children));
++    kfree(dir);
++}
++
++static void nm_dir_put(struct nomount_dir_node *dir_node)
++{
++    if (dir_node && atomic_dec_and_test(&dir_node->refs))
++        call_rcu(&dir_node->rcu, nm_dir_rcu_free);
++}
++
++static inline void nm_destroy_virtual_inode(struct inode *inode)
++{
++    struct nm_inode_info *info = READ_ONCE(inode->i_private);
++    if (!info) return;
++
++    WRITE_ONCE(inode->i_private, NULL);
++    smp_wmb();
++
++    nm_dir_put(info->dir_node);
++    if (info->r_path.dentry) path_put(&info->r_path);
++    kfree_rcu(info, rcu);
++}
++
++static inline void nm_destroy_hijacked_inode(struct inode *inode)
++{
++    struct nm_dir_ops *ops = nm_get_nm_iop(smp_load_acquire(&inode->i_op));
++    struct nomount_dir_node *node;
++
++    if (!ops && !(ops = nm_get_nm_fop(smp_load_acquire(&inode->i_fop)))) return;
++    if (!(node = xchg(&ops->dir_node, NULL))) return;
++
++    if (inode->i_op == &ops->fake_iop) smp_store_release(&inode->i_op, ops->orig_iop);
++    if (inode->i_fop == &ops->fake_fop) smp_store_release(&inode->i_fop, ops->orig_fop);
++    nm_dir_put(node);
++    kfree_rcu(ops, rcu);
++}
++
++struct nomount_proxy_ctx {
++    struct dir_context ctx;
++    struct dir_context *orig_ctx;
++    struct nomount_dir_node *dir_node;
++    uid_t fsuid;
++    bool emitted;
++};
++
++static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *name, int namelen,
++                                        loff_t offset, u64 ino, unsigned int d_type)
++{
++    struct nomount_proxy_ctx *proxy = container_of(ctx, struct nomount_proxy_ctx, ctx);
++    struct dir_context *orig_ctx = proxy->orig_ctx;
++    NM_ACTOR_RET ret;
++
++    if (likely(proxy->dir_node != NULL)) {
++        rcu_guard();
++        if (unlikely(nm_lookup_rule(proxy->dir_node, name, namelen, proxy->fsuid, NULL) != NULL)) {
++            proxy->ctx.pos = offset;
++            return NM_ACTOR_CONTINUE;
++        }
++    }
++
++    orig_ctx->pos = proxy->ctx.pos;
++    ret = orig_ctx->actor(orig_ctx, name, namelen, offset, ino, d_type);
++    proxy->ctx.pos = orig_ctx->pos;
++    proxy->emitted = true;
++
++    return ret;
++}
++
++static inline void __nomount_emit_virtual_children(struct dir_context *ctx, struct nomount_dir_node *dir_node, uid_t fsuid)
++{
++	if (!dir_node) return;
++	if (!nm_is_virtual_pos(ctx->pos)) ctx->pos = nm_pack_pos(0);
++
++	for (int id = nm_unpack_pos(ctx->pos); ; id++) {
++		char name_buf[NAME_MAX + 1];
++		int name_len = 0;
++		unsigned long v_ino = 0;
++		unsigned char d_type = 0;
++		bool do_emit = false, has_more = false;
++
++		rcu_read_lock();
++		struct nomount_child_array *array = rcu_dereference(dir_node->children);
++		if (array && id < array->count) {
++			struct nomount_leaf *leaf = nm_entries(array)[id].leaf;
++			struct nm_rule *rule = nm_select_rule(leaf, fsuid);
++			has_more = true;
++			if (rule && !(rule->flags & NM_FLAG_WHITEOUT)) {
++				name_len = leaf->child_len;
++				if (likely(name_len <= NAME_MAX)) {
++					memcpy(name_buf, nm_get_child_name(leaf), name_len);
++					v_ino = leaf->v_ino;
++					d_type = (rule->flags & NM_FLAG_IS_DIR) ? DT_DIR : DT_REG;
++					do_emit = true;
++				}
++			}
++		}
++		rcu_read_unlock();
++		if (!has_more) break;
++
++		ctx->pos = nm_pack_pos(id);
++		if (do_emit && !dir_emit(ctx, name_buf, name_len, v_ino, d_type)) break;
++		ctx->pos = nm_pack_pos(id + 1);
++	}
++}
++
++static void nomount_init_prealloc_inode(struct inode *inode, struct nm_inode_info *info, unsigned long v_ino)
++{
++    struct inode *r_inode = info->r_path.dentry ? d_backing_inode(info->r_path.dentry) : NULL;
++
++    inode->i_ino = v_ino;
++    inode->i_private = info;
++    inode->i_mode   = r_inode ? r_inode->i_mode    : (S_IFDIR | 0755);
++    inode->i_size   = r_inode ? i_size_read(r_inode) : 4096;
++    inode->i_blocks = r_inode ? r_inode->i_blocks  : 8;
++    inode->i_uid    = r_inode ? r_inode->i_uid     : GLOBAL_ROOT_UID;
++    inode->i_gid    = r_inode ? r_inode->i_gid     : GLOBAL_ROOT_GID;
++    inode->i_op     = (r_inode && !S_ISDIR(r_inode->i_mode)) ? &nm_file_iops : &nm_dir_iops;
++
++    if (r_inode && !S_ISDIR(r_inode->i_mode))
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
++        inode->i_fop = (r_inode->i_fop && r_inode->i_fop->mmap_prepare) ? &nm_file_fops_mmap_prepare : &nm_file_fops;
++#else
++        inode->i_fop = &nm_file_fops;
++#endif
++    else
++        inode->i_fop = &nm_dir_fops;
++
++    if (r_inode) nm_sync_inode_times(inode, r_inode), inode->i_mapping = r_inode->i_mapping;
++    inode->i_flags |= S_PRIVATE | S_NOATIME | S_NOCMTIME | S_NOSEC;
++    if (!S_ISLNK(inode->i_mode)) inode->i_opflags |= IOP_NOFOLLOW;
++}
++
++static bool nm_inode_matches_binding(struct inode *inode, const struct path *path,
++                                     struct nomount_dir_node *dir_node)
++{
++    struct nm_inode_info *info = READ_ONCE(inode->i_private);
++    struct inode *r_inode;
++
++    if (!info || info->dir_node != dir_node || !path_equal(&info->r_path, path))
++        return false;
++    r_inode = path->dentry ? d_backing_inode(path->dentry) : NULL;
++    return !r_inode || (inode->i_state & I_NEW) ||
++           (inode->i_mode == r_inode->i_mode && uid_eq(inode->i_uid, r_inode->i_uid) &&
++            gid_eq(inode->i_gid, r_inode->i_gid));
++}
++
++static int nm_cached_inode_test(struct inode *inode, void *data)
++{
++    struct nm_inode_info *info = data;
++    return inode->i_op == &nm_dir_iops &&
++           nm_inode_matches_binding(inode, &info->r_path, info->dir_node);
++}
++
++static int nm_cached_inode_set(struct inode *inode, void *data)
++{
++    inode->i_private = data;
++    inode->i_op = &nm_dir_iops;
++    return 0;
++}
++
++static struct dentry *nm_materialize_rule(struct inode *dir, struct dentry *dentry, struct nm_rule_info *rule_info)
++{
++    struct nm_inode_info *info = NULL;
++    struct inode *inode;
++    struct dentry *res = ERR_PTR(-ENODATA);
++
++    if (rule_info->flags & NM_FLAG_WHITEOUT) {
++        nomount_hijack_dentry_ops(dir, dentry, true);
++        d_add(dentry, NULL);
++        res = NULL;
++        goto out;
++    }
++
++    if (!(info = kmalloc(sizeof(*info), GFP_KERNEL))) goto out;
++    info->r_path = rule_info->r_path;
++    info->dir_node = rule_info->this_dir;
++    if (rule_info->this_dir)
++        inode = iget5_locked(dir->i_sb, (unsigned long)rule_info->this_dir, nm_cached_inode_test, nm_cached_inode_set, info);
++    else
++        inode = new_inode(dir->i_sb);
++
++    if (!inode) goto out;
++    if (!rule_info->this_dir || (inode->i_state & I_NEW)) {
++        nomount_init_prealloc_inode(inode, info, rule_info->v_ino);
++        info = NULL;
++        if (rule_info->this_dir) unlock_new_inode(inode);
++    }
++    if (!IS_ERR((res = d_splice_alias(inode, dentry))))
++        nomount_hijack_dentry_ops(dir, res ? res : dentry, true);
++    if (!info) return res;
++out:
++    kfree(info);
++    nm_dir_put(rule_info->this_dir);
++    if (rule_info->r_path.dentry) path_put(&rule_info->r_path);
++    return res;
++}
++
++/*** i_op / s_op / f_op Hijacking Hooks ***/
++static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
++{
++    const struct inode_operations *orig_iop = NULL;
++    struct nm_rule_info rule_info = {0};
++    struct nm_dir_ops *nm_iop = NULL;
++    struct dentry *res, *target;
++    bool found = false;
++
++    rcu_read_lock();
++    if (likely((nm_iop = nm_get_nm_iop(rcu_dereference(dir->i_op))))) {
++        orig_iop = nm_iop->orig_iop;
++        uid_t fsuid = current_fsuid().val;
++        if (likely(!nomount_is_uid_blocked(fsuid))) {
++            struct nomount_dir_node *dir_node = rcu_dereference(nm_iop->dir_node);
++            if (dir_node) found = nm_resolve_rule(dir_node, dentry->d_name.name, dentry->d_name.len, fsuid, &rule_info);
++        }
++    }
++    rcu_read_unlock();
++
++    if (found)
++        return nm_materialize_rule(dir, dentry, &rule_info);
++
++    if (likely(orig_iop && orig_iop->lookup)) {
++        target = (res = orig_iop->lookup(dir, dentry, flags)) ? res : dentry;
++        if (likely(!IS_ERR(target)))
++            nomount_hijack_dentry_ops(dir, target, false);
++        return res;
++    }
++    return ERR_PTR(-EOPNOTSUPP);
++}
++
++static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx)
++{
++    const struct file_operations *orig_fop = NULL;
++    struct nomount_dir_node *d, *dir_node = NULL;
++    struct nm_dir_ops *nm_fop = NULL;
++    struct nomount_proxy_ctx proxy_ctx = { .ctx.actor = nomount_actor_proxy };
++    uid_t fsuid = current_fsuid().val;
++    bool uid_blocked = false;
++    int res = 0;
++
++    rcu_read_lock();
++    if ((nm_fop = nm_get_nm_fop(rcu_dereference(file->f_op)))) {
++        orig_fop = nm_fop->orig_fop;
++        if ((d = rcu_dereference(nm_fop->dir_node)) && rcu_access_pointer(d->children) && atomic_inc_not_zero(&d->refs))
++            dir_node = d;
++    }
++    rcu_read_unlock();
++
++    if (unlikely(!orig_fop || !dir_node))
++        goto do_real_iterate;
++
++    uid_blocked = nomount_is_uid_blocked(fsuid);
++    if (unlikely(nm_is_virtual_pos(ctx->pos))) {
++        if (!uid_blocked) __nomount_emit_virtual_children(ctx, dir_node, fsuid);
++        nm_dir_put(dir_node);
++        return 0;
++    }
++
++    if (likely(!rcu_access_pointer(dir_node->children)) || unlikely(uid_blocked))
++        goto put_dir_node;
++
++    proxy_ctx.ctx.pos = ctx->pos;
++    proxy_ctx.orig_ctx = ctx;
++    proxy_ctx.fsuid = fsuid;
++    proxy_ctx.dir_node = dir_node;
++    res = nm_call_iterate(file, &proxy_ctx.ctx, orig_fop);
++    ctx->pos = proxy_ctx.ctx.pos;
++
++    if (res < 0 || proxy_ctx.emitted) {
++        nm_dir_put(dir_node);
++        return res;
++    }
++
++    ctx->pos = nm_pack_pos(0);
++    __nomount_emit_virtual_children(ctx, dir_node, fsuid);
++    nm_dir_put(dir_node);
++    return res;
++
++put_dir_node:
++    nm_dir_put(dir_node);
++do_real_iterate:
++    if (likely(orig_fop))
++        return nm_call_iterate(file, ctx, orig_fop);
++    return -ENOTDIR;
++}
++
++static int nomount_hijacked_drop_inode(struct inode *inode)
++{
++    struct nm_sop *nm_sop;
++    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) return 1;
++
++    nm_sop = nm_get_nm_sop(smp_load_acquire(&inode->i_sb->s_op));
++    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->drop_inode)
++        return nm_sop->orig_sop->drop_inode(inode);
++
++    return !inode->i_nlink || inode_unhashed(inode);
++}
++
++static void nomount_hijacked_evict_inode(struct inode *inode)
++{
++    struct nm_sop *nm_sop = nm_get_nm_sop(smp_load_acquire(&inode->i_sb->s_op));
++    bool virtual = inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops;
++
++    virtual ? nm_destroy_virtual_inode(inode) : nm_destroy_hijacked_inode(inode);
++
++    if (!virtual && nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->evict_inode) {
++        nm_sop->orig_sop->evict_inode(inode);
++    } else {
++        truncate_inode_pages_final(&inode->i_data);
++        clear_inode(inode);
++    }
++}
++
++/*** file / inode / superblock operations ***/
++
++static int nm_open(struct inode *inode, struct file *file)
++{
++    struct nm_inode_info *info = inode->i_private;
++    struct file *real_file;
++
++    if (unlikely(!info)) return -ENODEV;
++    if (unlikely(!info->r_path.dentry)) {
++        file->private_data = NULL;
++        return 0;
++    }
++
++    real_file = dentry_open(&info->r_path, (file->f_flags & ~(O_CREAT | O_EXCL | O_NOCTTY)), file->f_cred);
++    if (IS_ERR(real_file)) return PTR_ERR(real_file);
++
++    file->private_data = real_file;
++    return 0;
++}
++
++static int nm_release(struct inode *inode, struct file *file)
++{
++    struct file *real_file = file->private_data;
++    if (real_file) fput(real_file), file->private_data = NULL;
++    return 0;
++}
++
++static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
++{
++    struct file *real_file = file->private_data;
++    loff_t res;
++    if (!real_file) return -EINVAL;
++
++    real_file->f_pos = file->f_pos;
++    res = vfs_llseek(real_file, offset, whence);
++    file->f_pos = real_file->f_pos;
++
++    return res;
++}
++
++static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
++{
++    struct file *file = iocb->ki_filp;
++    struct file *real_file = file->private_data;
++    ssize_t ret;
++    if (!real_file || !real_file->f_op->read_iter) return -EINVAL;
++
++    iocb->ki_filp = real_file;
++    ret = real_file->f_op->read_iter(iocb, to);
++    iocb->ki_filp = file;
++
++    return ret;
++}
++
++static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
++{
++    struct file *file = iocb->ki_filp;
++    struct file *real_file = file->private_data;
++    ssize_t ret;
++    if (!real_file || !real_file->f_op->write_iter) return -EINVAL;
++
++    iocb->ki_filp = real_file;
++    ret = real_file->f_op->write_iter(iocb, from);
++    iocb->ki_filp = file;
++
++    return ret;
++}
++
++static int nm_mmap(struct file *file, struct vm_area_struct *vma)
++{
++    int ret = generic_file_mmap(file, vma);
++    return ret ? ret : (file_inode(file)->i_flags &= ~S_PRIVATE, 0);
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
++static int nm_mmap_prepare(struct vm_area_desc *desc)
++{
++    int ret = generic_file_mmap_prepare(desc);
++    return ret ? ret : (file_inode(desc->file)->i_flags &= ~S_PRIVATE, 0);
++}
++#endif
++
++static long nm_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++    struct file *real_file = file->private_data;
++    if (!real_file || !real_file->f_op->unlocked_ioctl) return -ENOTTY;
++    return real_file->f_op->unlocked_ioctl(real_file, cmd, arg);
++}
++
++#ifdef CONFIG_COMPAT
++static long nm_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++    struct file *real_file = file->private_data;
++    if (!real_file || !real_file->f_op->compat_ioctl) return -ENOTTY;
++    return real_file->f_op->compat_ioctl(real_file, cmd, arg);
++}
++#endif
++
++static ssize_t nm_splice_read(struct file *in, loff_t *ppos, struct pipe_inode_info *pipe,
++                              size_t len, unsigned int flags)
++{
++    struct file *real_file = in->private_data;
++    if (!real_file || !real_file->f_op->splice_read) return -EINVAL;
++    return real_file->f_op->splice_read(real_file, ppos, pipe, len, flags);
++}
++
++static ssize_t nm_splice_write(struct pipe_inode_info *pipe, struct file *out,
++                               loff_t *ppos, size_t len, unsigned int flags)
++{
++    struct file *real_file = out->private_data;
++    if (!real_file || !real_file->f_op->splice_write) return -EINVAL;
++    return real_file->f_op->splice_write(pipe, real_file, ppos, len, flags);
++}
++
++static int nm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
++{
++    struct file *real_file = file->private_data;
++    if (!real_file || !real_file->f_op->fsync) return -EINVAL;
++    return real_file->f_op->fsync(real_file, start, end, datasync);
++}
++
++static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
++{
++    struct nm_inode_info *info = d_backing_inode(dentry)->i_private;
++    struct inode *r_inode;
++
++    if (unlikely(!info)) return -EIO;
++    if (!info->r_path.dentry) return 0;
++
++    r_inode = d_backing_inode(info->r_path.dentry);
++    if (!r_inode || !r_inode->i_op || !r_inode->i_op->listxattr) return 0;
++    return r_inode->i_op->listxattr(info->r_path.dentry, buffer, size);
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
++static int nm_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
++#else
++static int nm_getattr(IDMAP_ARG const struct path *path, struct kstat *stat, u32 request_mask, unsigned int query_flags)
++#endif
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
++    struct dentry *dentry = path->dentry;
++#endif
++    struct inode *v_inode = d_backing_inode(dentry);
++    struct nm_inode_info *info = v_inode->i_private;
++    int res = 0;
++
++    if (unlikely(!info)) return -EIO;
++    if (unlikely(!info->r_path.dentry))
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
++        generic_fillattr(IDMAP_CALL request_mask, v_inode, stat);
++#else
++        generic_fillattr(IDMAP_CALL v_inode, stat);
++#endif
++    else
++#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
++        res = vfs_getattr_nosec(&info->r_path, stat);
++#else
++        res = vfs_getattr_nosec(&info->r_path, stat, request_mask, query_flags);
++#endif
++
++    if (likely(res == 0)) {
++        stat->ino = v_inode->i_ino;
++        stat->dev = v_inode->i_sb->s_dev;
++    }
++    
++    return res;
++}
++
++static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
++{
++    struct inode *v_inode = d_inode(dentry);
++    struct nm_inode_info *info = v_inode->i_private;
++    struct inode *r_inode;
++    int err;
++
++    if (unlikely(!info)) return -EIO;
++    if (!info->r_path.dentry) return 0;
++
++    r_inode = d_backing_inode(info->r_path.dentry);
++    inode_lock(r_inode);
++    err = notify_change(IDMAP_CALL info->r_path.dentry, attr, NULL);
++    inode_unlock(r_inode);
++
++    if (likely(!err)) {
++        if (attr->ia_valid & ATTR_SIZE) i_size_write(v_inode, i_size_read(r_inode));
++        if (attr->ia_valid & ATTR_MODE) v_inode->i_mode = r_inode->i_mode;
++        if (attr->ia_valid & ATTR_UID)  v_inode->i_uid = r_inode->i_uid;
++        if (attr->ia_valid & ATTR_GID)  v_inode->i_gid = r_inode->i_gid;
++        nm_sync_inode_times(v_inode, r_inode);
++    }
++    return err;
++}
++
++static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struct delayed_call *done)
++{
++    struct nm_inode_info *info = inode->i_private;
++    struct inode *real_inode;
++    struct dentry *target_dentry;
++    if (unlikely(!info || !info->r_path.dentry)) return ERR_PTR(-ECHILD);
++
++    real_inode = d_backing_inode(info->r_path.dentry);
++    target_dentry = dentry ? info->r_path.dentry : NULL;
++    if (real_inode && real_inode->i_op && real_inode->i_op->get_link) {
++        return real_inode->i_op->get_link(target_dentry, real_inode, done);
++    }
++
++    return ERR_PTR(-EINVAL);
++}
++
++static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
++{
++    struct nm_inode_info *info = file_inode(file)->i_private;
++    struct nomount_dir_node *dir_node = info ? info->dir_node : NULL;
++    struct file *real_file = file->private_data;
++    uid_t fsuid = current_fsuid().val;
++    bool uid_blocked = nomount_is_uid_blocked(fsuid);
++    int res = 0;
++
++    if (unlikely(nm_is_virtual_pos(ctx->pos)))
++        goto emit_virtual;
++
++    if (real_file) {
++        if (unlikely(uid_blocked || !dir_node))
++            return nm_call_iterate(real_file, ctx, real_file->f_op);
++
++        struct nomount_proxy_ctx proxy_ctx = {
++            .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos, .orig_ctx = ctx,
++            .dir_node = dir_node, .fsuid = fsuid, .emitted = false,
++        };
++        res = nm_call_iterate(real_file, &proxy_ctx.ctx, real_file->f_op);
++        ctx->pos = proxy_ctx.ctx.pos;
++        if (res < 0 || proxy_ctx.emitted) return res;
++        ctx->pos = nm_pack_pos(0);
++    } else if (info && !info->r_path.dentry) {
++        if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) return 0;
++        ctx->pos = nm_pack_pos(0);
++    } else {
++        return -ENOTDIR;
++    }
++
++emit_virtual:
++    if (likely(!uid_blocked))
++        __nomount_emit_virtual_children(ctx, dir_node, fsuid);
++    return res;
++}
++
++static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
++{
++    struct nm_inode_info *info = dir->i_private;
++    struct nm_rule_info rule_info = {0};
++    struct nomount_dir_node *dir_node;
++    uid_t fsuid = current_fsuid().val;
++    struct dentry *res;
++
++    if (unlikely(nomount_is_uid_blocked(fsuid)))
++        goto negative_dentry;
++
++    if (info->dir_node)
++        if ((dir_node = READ_ONCE(info->dir_node)) && nm_resolve_rule(dir_node, dentry->d_name.name, dentry->d_name.len, fsuid, &rule_info))
++            return nm_materialize_rule(dir, dentry, &rule_info);
++
++    if (!info->r_path.dentry)
++        goto negative_dentry;
++
++    struct inode *r_dir = d_backing_inode(info->r_path.dentry);
++    if (r_dir->i_op->lookup) {
++        res = r_dir->i_op->lookup(r_dir, dentry, flags);
++        if (!IS_ERR(res ? res : dentry)) nomount_hijack_dentry_ops(dir, res ? res : dentry, false);
++        return res;
++    }
++    return ERR_PTR(-EOPNOTSUPP);
++
++negative_dentry:
++    nomount_hijack_dentry_ops(dir, dentry, true);
++    d_add(dentry, NULL);
++    return NULL;
++}
++
++struct nm_xattr_proxy {
++    struct xattr_handler fake;
++    const struct xattr_handler *orig;
++};
++
++static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry, struct inode *inode, const char *name, void *buffer, size_t size FLAGS_ARG)
++{
++    struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
++    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
++        struct nm_inode_info *info = inode->i_private;
++        if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
++        return __vfs_getxattr(info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size FLAGS_VAL);
++    }
++
++    return proxy->orig->get(proxy->orig, dentry, inode, name, buffer, size FLAGS_VAL);
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
++static int nm_xattr__get(const struct xattr_handler *handler, struct dentry *dentry,
++                         struct inode *inode, const char *name, void *buffer, size_t size)
++{
++    struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
++    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
++        struct nm_inode_info *info = inode->i_private;
++        if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
++        return __vfs_getxattr(info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size);
++    }
++
++    if (proxy->orig->__get)
++        return proxy->orig->__get(proxy->orig, dentry, inode, name, buffer, size);
++    return proxy->orig->get(proxy->orig, dentry, inode, name, buffer, size);
++}
++#endif
++
++static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct dentry *dentry, struct inode *inode, const char *name, const void *buffer, size_t size, int flags)
++{
++    struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
++    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
++        struct nm_inode_info *info = inode->i_private;
++        if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
++        return __vfs_setxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, d_inode(info->r_path.dentry), xattr_full_name(handler, name), buffer, size, flags);
++    }
++    return proxy->orig->set(proxy->orig, IDMAP_CALL dentry, inode, name, buffer, size, flags);
++}
++
++static int nm_d_revalidate_common(struct inode *parent_inode, const struct qstr *name,
++                                  struct dentry *dentry, unsigned int flags)
++{
++    struct nomount_dir_node *parent_dir = NULL;
++    const struct dentry_operations *orig_dops = NULL;
++    struct inode *inode = READ_ONCE(dentry->d_inode);
++    struct nomount_leaf *leaf = NULL;
++    struct nm_dir_ops *iop = NULL;
++    uid_t fsuid = current_fsuid().val;
++    bool owned, has_rule = false, whiteout = false, match_rule = false;
++
++    if (unlikely(!parent_inode)) return 1;
++    owned = (READ_ONCE(dentry->d_op) == &nm_owned_dops) ||
++            (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops));
++
++    rcu_read_lock();
++    if (parent_inode->i_op == &nm_dir_iops) {
++        struct nm_inode_info *pinfo = rcu_dereference(parent_inode->i_private);
++        parent_dir = pinfo ? pinfo->dir_node : NULL;
++    } else if ((iop = nm_get_nm_iop(rcu_dereference(parent_inode->i_op)))) {
++        parent_dir = rcu_dereference(iop->dir_node);
++    }
++
++    if (!nomount_is_uid_blocked(fsuid) && parent_dir) {
++        struct nm_rule *rule = nm_lookup_rule(parent_dir, name->name, name->len, fsuid, &leaf);
++        if (rule) {
++            has_rule = true;
++            if (rule->flags & NM_FLAG_WHITEOUT)
++                whiteout = true;
++            else if (inode && (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops))
++                match_rule = nm_inode_matches_binding(inode, &rule->r_path, (rule->flags & NM_FLAG_IS_DIR) ? leaf->this_dir : NULL);
++        }
++    }
++
++    orig_dops = nm_get_orig_dops(iop);
++    rcu_read_unlock();
++
++    if (whiteout) return !inode;
++    if (match_rule) return 1;
++    if (has_rule || owned) goto drop_it;
++
++    return nm_call_orig_revalidate(orig_dops, parent_inode, name, dentry, flags);
++
++drop_it:
++    if (flags & LOOKUP_RCU) return -ECHILD;
++    d_drop(dentry);
++    return 0;
++}
++
++static int nm_d_weak_revalidate(struct dentry *dentry, unsigned int flags)
++{
++    return nm_d_revalidate_common(d_inode(READ_ONCE(dentry->d_parent)), &dentry->d_name, dentry, flags);
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
++static int nm_d_revalidate(struct inode *parent_inode, const struct qstr *name, struct dentry *dentry, unsigned int flags) {
++    return nm_d_revalidate_common(parent_inode, name, dentry, flags);
++}
++#else
++static int nm_d_revalidate(struct dentry *dentry, unsigned int flags) {
++    return nm_d_revalidate_common(d_inode(READ_ONCE(dentry->d_parent)), &dentry->d_name, dentry, flags);
++}
++#endif
++
++static const struct dentry_operations nm_owned_dops = {
++    .d_revalidate = nm_d_revalidate,
++    .d_weak_revalidate = nm_d_weak_revalidate,
++};
++
++static const struct dentry_operations nm_dops = {
++    .d_revalidate = nm_d_revalidate,
++    .d_weak_revalidate = nm_d_weak_revalidate,
++};
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
++static const struct file_operations nm_file_fops_mmap_prepare = {
++    .owner = THIS_MODULE,
++    .llseek = nm_llseek,
++    .open = nm_open,
++    .release = nm_release,
++    .read_iter = nm_read_iter,
++    .write_iter = nm_write_iter,
++    .mmap_prepare = nm_mmap_prepare,
++    .unlocked_ioctl = nm_unlocked_ioctl,
++#ifdef CONFIG_COMPAT
++    .compat_ioctl = nm_compat_ioctl,
++#endif
++    .splice_read = nm_splice_read,
++    .splice_write = nm_splice_write,
++    .fsync = nm_fsync,
++};
++#endif
++
++static const struct file_operations nm_file_fops = {
++    .owner = THIS_MODULE,
++    .llseek = nm_llseek,
++    .open = nm_open,
++    .release = nm_release,
++    .read_iter = nm_read_iter,
++    .write_iter = nm_write_iter,
++    .mmap = nm_mmap,
++    .unlocked_ioctl = nm_unlocked_ioctl,
++#ifdef CONFIG_COMPAT
++    .compat_ioctl = nm_compat_ioctl,
++#endif
++    .splice_read = nm_splice_read,
++    .splice_write = nm_splice_write,
++    .fsync = nm_fsync,
++};
++
++static const struct inode_operations nm_file_iops = {
++    .getattr = nm_getattr,
++    .setattr = nm_setattr,
++    .listxattr = nm_listxattr,
++    .get_link = nm_get_link,
++};
++
++static const struct file_operations nm_dir_fops = {
++    .owner = THIS_MODULE,
++    .open = nm_open,
++    .release = nm_release,
++    .llseek = default_llseek,
++    .read = generic_read_dir,
++    .iterate_shared = nm_dir_iterate_dir,
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
++    .iterate = nm_dir_iterate_dir,
++#endif
++};
++
++static const struct inode_operations nm_dir_iops = {
++    .lookup = nm_dir_lookup,
++    .getattr = nm_getattr,
++    .setattr = nm_setattr,
++    .listxattr = nm_listxattr,
++};
++
++/* --- Hijacking Management --- */
++
++static inline int nomount_hijack_superblock(struct super_block *sb)
++{
++    struct nm_sop *nm_sop;
++    int count = 0;
++
++    if (nm_get_nm_sop(smp_load_acquire(&sb->s_op))) return 0;
++    if (!(nm_sop = kmalloc(sizeof(*nm_sop), GFP_KERNEL))) return -ENOMEM;
++
++    nm_sop->fake_sop = *(sb->s_op);
++    nm_sop->orig_sop = sb->s_op;
++    nm_sop->orig_xattr = nm_sop->fake_xattr = NULL;
++    nm_sop->sb = sb;
++    nm_sop->fake_sop.drop_inode = nomount_hijacked_drop_inode;
++    nm_sop->fake_sop.evict_inode = nomount_hijacked_evict_inode;
++
++    if (sb->s_xattr) {
++        const struct xattr_handler **new_array;
++        struct nm_xattr_proxy *proxies;
++
++        while (sb->s_xattr[count]) count++;
++        if (!(new_array = kmalloc((count + 1) * sizeof(void *) + (count * sizeof(*proxies)), GFP_KERNEL))) {
++            kfree(nm_sop);
++            return -ENOMEM;
++        }
++        proxies = (void *)(new_array + count + 1);
++        new_array[count] = NULL;
++        for (int i = 0; i < count; i++) {
++            proxies[i].orig = sb->s_xattr[i];
++            proxies[i].fake = *sb->s_xattr[i];
++            if (proxies[i].fake.get) proxies[i].fake.get = nm_xattr_get;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
++            if (proxies[i].fake.__get) proxies[i].fake.__get = nm_xattr__get;
++#endif
++            if (proxies[i].fake.set) proxies[i].fake.set = nm_xattr_set;
++            new_array[i] = &proxies[i].fake;
++        }
++        nm_sop->orig_xattr = (const struct xattr_handler **)sb->s_xattr;
++        nm_sop->fake_xattr = new_array;
++        smp_store_release((const struct xattr_handler ***)&sb->s_xattr, new_array);
++        nm_debug("xattr handlers successfully hijacked for dev: 0x%x\n", sb->s_dev);
++    }
++
++    list_add_tail_rcu(&nm_sop->list, &nomount_sb_list);
++    smp_store_release(&sb->s_op, &nm_sop->fake_sop);
++    nm_debug("Superblock successfully hijacked for dev: 0x%x\n", sb->s_dev);
++    return 0;
++}
++
++static inline int nomount_hijack_dir_ops(struct nomount_dir_node *dir_node, struct inode *inode)
++{
++    const struct inode_operations *iop = smp_load_acquire(&inode->i_op);
++    const struct file_operations *fop = smp_load_acquire(&inode->i_fop);
++    struct nm_dir_ops *ops;
++    int err;
++    bool iterate = fop && (fop->iterate_shared
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
++        || fop->iterate
++#endif
++    );
++
++    if ((ops = nm_get_nm_iop(iop)) || (ops = nm_get_nm_fop(fop))) {
++        if (ops->dir_node != dir_node) return -EBUSY;
++        return nomount_hijack_superblock(inode->i_sb);
++    }
++    if (!iop && !iterate) return -EOPNOTSUPP;
++    if (!(ops = kmalloc(sizeof(*ops), GFP_KERNEL))) return -ENOMEM;
++    if ((err = nomount_hijack_superblock(inode->i_sb))) {
++        kfree(ops);
++        return err;
++    }
++
++    ops->orig_iop = iop;
++    ops->orig_fop = fop;
++    ops->orig_dops = NULL;
++    ops->dir_node = dir_node;
++    if (iop) {
++        ops->fake_iop = *iop;
++        ops->fake_iop.lookup = nomount_hijacked_lookup;
++    }
++    if (fop) {
++        ops->fake_fop = *fop;
++        ops->fake_fop.owner = THIS_MODULE;
++        if (fop->iterate_shared) ops->fake_fop.iterate_shared = nomount_hijacked_iterate_dir;
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
++        if (fop->iterate) ops->fake_fop.iterate = nomount_hijacked_iterate_dir;
++#endif
++    }
++    atomic_inc(&dir_node->refs);
++    if (iop) smp_store_release(&inode->i_op, &ops->fake_iop);
++    if (fop) smp_store_release(&inode->i_fop, &ops->fake_fop);
++
++    nm_debug("Successfully hijacked VFS ops for parent dir (ino: %lu)\n", (unsigned long)inode->i_ino);
++    return 1;
++}
++
++static void nomount_hijack_dentry_ops(struct inode *dir, struct dentry *dentry, bool injected)
++{
++#define DCACHE_OPS (DCACHE_OP_HASH | DCACHE_OP_COMPARE | DCACHE_OP_DELETE | DCACHE_OP_PRUNE | DCACHE_OP_REAL)
++    const struct dentry_operations *orig, *current_orig;
++    struct nm_dir_ops *iop;
++
++    if (unlikely(!dentry || !dir)) return;
++    iop = nm_get_nm_iop(smp_load_acquire(&dir->i_op));
++    orig = READ_ONCE(dentry->d_op);
++    if (unlikely(!injected && !iop && orig)) return;
++    if (orig == &nm_owned_dops || orig == &nm_dops || (iop && orig == &iop->fake_dops)) return;
++
++    spin_lock(&dentry->d_lock);
++    orig = dentry->d_op;
++    if (orig == &nm_owned_dops || orig == &nm_dops || (iop && orig == &iop->fake_dops)) { 
++        spin_unlock(&dentry->d_lock); 
++        return; 
++    }
++
++    if (injected) {
++        dentry->d_op = &nm_owned_dops;
++        dentry->d_flags &= ~DCACHE_OPS;
++        dentry->d_flags |= (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE | DCACHE_DONTCACHE);
++    } else if (orig && iop) {
++        if (unlikely((current_orig = smp_load_acquire(&iop->orig_dops)) != orig)) {
++            if (current_orig == NULL) {
++                if (cmpxchg(&iop->orig_dops, NULL, NM_DOP_INITIALIZING) == NULL) {
++                    iop->fake_dops = *orig;
++                    iop->fake_dops.d_revalidate = nm_d_revalidate;
++                    smp_store_release(&iop->orig_dops, orig);
++                } else {
++                    while (smp_load_acquire(&iop->orig_dops) == NM_DOP_INITIALIZING) cpu_relax();
++                }
++            } else if (current_orig == NM_DOP_INITIALIZING) {
++                while (smp_load_acquire(&iop->orig_dops) == NM_DOP_INITIALIZING) cpu_relax();
++            }
++        }
++        dentry->d_op = &iop->fake_dops;
++        dentry->d_flags |= DCACHE_OP_REVALIDATE;
++    } else if (!orig) {
++        dentry->d_op = &nm_dops;
++        dentry->d_flags &= ~DCACHE_OPS;
++        dentry->d_flags |= (DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE);
++    }
++
++    spin_unlock(&dentry->d_lock);
++}
++
++static void nomount_restore_superblocks(void)
++{
++    struct nm_sop *nm_sop, *tmp;
++    struct inode *inode;
++    list_for_each_entry_safe(nm_sop, tmp, &nomount_sb_list, list) {
++        if (nm_sop->sb) {
++            shrink_dcache_sb(nm_sop->sb);
++            spin_lock(&nm_sop->sb->s_inode_list_lock);
++            list_for_each_entry(inode, &nm_sop->sb->s_inodes, i_sb_list) {
++                if (!inode->i_op && !inode->i_fop) continue;
++                nm_destroy_hijacked_inode(inode);
++            }
++            spin_unlock(&nm_sop->sb->s_inode_list_lock);
++            smp_store_release(&nm_sop->sb->s_op, nm_sop->orig_sop);
++            if (nm_sop->fake_xattr) {
++                smp_store_release((const struct xattr_handler ***)&nm_sop->sb->s_xattr, nm_sop->orig_xattr);
++                kfree(nm_sop->fake_xattr); 
++            }
++            nm_debug("Successfully cured superblock for dev: 0x%x\n", nm_sop->sb->s_dev);
++        }
++        list_del_rcu(&nm_sop->list);
++        kfree_rcu(nm_sop, rcu);
++    }
++}
++
++/*** Module Management ***/
++
++static struct nomount_dir_node *__nomount_alloc_dir_node(void)
++{
++    struct nomount_dir_node *dir_node = kzalloc(sizeof(*dir_node), GFP_KERNEL);
++    if (dir_node) atomic_set(&dir_node->refs, 1);
++    return dir_node;
++}
++
++static struct nomount_child_array *nm_alloc_child_array(int count, u16 bloom_words)
++{
++    size_t sz = sizeof(struct nomount_child_array) + bloom_words * sizeof(u64) + count * sizeof(struct nm_child);
++    struct nomount_child_array *array = kmalloc(sz, GFP_KERNEL);
++    if (array) {
++        array->count = count;
++        array->bloom_words = bloom_words;
++    }
++    return array;
++}
++
++static void nm_publish_child_view(struct nomount_dir_node *dir_node, struct nomount_child_array *children)
++{
++    struct nomount_child_array *old = rcu_dereference_protected(dir_node->children, lockdep_is_held(&nomount_mutex));
++    rcu_assign_pointer(dir_node->children, children);
++    if (!children && dir_node->pinned_dentry) {
++        struct dentry *pinned = dir_node->pinned_dentry;
++        dir_node->pinned_dentry = NULL;
++        dput(pinned);
++    }
++    if (old) kfree_rcu(old, rcu);
++}
++
++static int __nomount_inject_child_locked(struct nomount_dir_node *dir_node, struct nomount_leaf *leaf, const char *name, size_t name_len)
++{
++    struct nomount_child_array *array, *old = rcu_dereference_protected(dir_node->children, lockdep_is_held(&nomount_mutex));
++    int count = old ? old->count : 0, pos = 0;
++    u32 full_h = full_name_hash((const void *)(unsigned long)NOMOUNT_MAGIC_SIG, name, name_len);
++    u32 bloom_h = nm_qhash(name, name_len);
++
++    if (old && nomount_bsearch_child(old, name, name_len, full_h, &pos)) return -EEXIST;
++    if (!(array = nm_alloc_child_array(count + 1, nm_bloom_words_for(count + 1)))) return -ENOMEM;
++
++    if (old) {
++        memcpy(nm_entries(array), nm_entries(old), pos * sizeof(struct nm_child));
++        memcpy(nm_entries(array) + pos + 1, nm_entries(old) + pos, (count - pos) * sizeof(struct nm_child));
++    }
++    if (array->bloom_words) {
++        if (old && array->bloom_words == old->bloom_words) {
++            memcpy(array->bloom, old->bloom, old->bloom_words * sizeof(u64));
++        } else {
++            memset(array->bloom, 0, array->bloom_words * sizeof(u64));
++            for (int i = 0; i < count; i++)
++                nm_bloom_set(array, nm_entries(old)[i].bloom_hash);
++        }
++        nm_bloom_set(array, bloom_h);
++    }
++    nm_entries(array)[pos] = (struct nm_child){ .hash = full_h, .bloom_hash = bloom_h, .leaf = leaf };
++    leaf->child_len = name_len;
++    leaf->parent_dir = dir_node;
++    atomic_inc(&dir_node->refs);
++    nm_publish_child_view(dir_node, array);
++    return 0;
++}
++
++static struct nomount_dir_node *__nomount_delete_child_locked(struct nomount_leaf *leaf, bool clear)
++{
++    struct nomount_dir_node *dir_node = leaf->parent_dir;
++    struct nomount_child_array *old, *array = NULL;
++    int pos;
++
++    if (!dir_node) return NULL;
++    if (!(old = rcu_dereference_protected(dir_node->children, lockdep_is_held(&nomount_mutex)))) return dir_node;
++    if (!clear) {
++        for (pos = 0; pos < old->count && nm_entries(old)[pos].leaf != leaf; pos++) {}
++        if (pos == old->count) return dir_node;
++        if (old->count > 1) {
++            int new_count = old->count - 1;
++            if (!(array = nm_alloc_child_array(new_count, nm_bloom_words_for(new_count)))) return ERR_PTR(-ENOMEM);
++            memcpy(nm_entries(array), nm_entries(old), pos * sizeof(struct nm_child));
++            memcpy(nm_entries(array) + pos, nm_entries(old) + pos + 1, (old->count - pos - 1) * sizeof(struct nm_child));
++            if (array->bloom_words) {
++                memset(array->bloom, 0, array->bloom_words * sizeof(u64));
++                for (int i = 0; i < array->count; i++)
++                    nm_bloom_set(array, nm_entries(array)[i].bloom_hash);
++            }
++        }
++    }
++    nm_publish_child_view(dir_node, array);
++    return dir_node;
++}
++
++static struct nomount_leaf *nm_find_leaf(const char *path, u16 len)
++{
++    struct nomount_leaf *leaf;
++    u32 hash = full_name_hash((const void *)(unsigned long)NOMOUNT_MAGIC_SIG, path, len);
++    hash_for_each_possible(nomount_leaves_ht, leaf, ht_node, hash) {
++        if (leaf->v_len == len && !memcmp(leaf->paths, path, len)) return leaf;
++    }
++    return NULL;
++}
++
++static struct nm_rule_array *nm_alloc_rule_array(int count, size_t heap_size)
++{
++    struct nm_rule_array *arr = kmalloc(sizeof(struct nm_rule_array) + count * sizeof(struct nm_rule) + heap_size, GFP_KERNEL);
++    if (arr) arr->count = count;
++    return arr;
++}
++
++static int nm_prepare_rule(const char *r_path, u16 r_len, u32 flags, unsigned int uid, struct nm_rule *out)
++{
++    bool backed = !(flags & (NM_FLAG_WHITEOUT | NM_FLAG_VIRTUAL_DIR));
++    if (backed && !r_path) return -EINVAL;
++    if (backed) while (r_len > 1 && r_path[r_len - 1] == '/') r_len--;
++    else r_len = 0;
++
++    memset(out, 0, sizeof(*out));
++    out->r_len = r_len;
++    out->flags = flags;
++    out->target_uid = uid;
++    if (backed) {
++        int err = kern_path(r_path, LOOKUP_FOLLOW, &out->r_path);
++        if (err) { memset(out, 0, sizeof(*out)); return err; }
++        struct inode *inode = d_backing_inode(out->r_path.dentry);
++        if (inode && S_ISDIR(inode->i_mode)) out->flags |= NM_FLAG_IS_DIR;
++    }
++    return 0;
++}
++
++static struct nomount_leaf *nm_alloc_leaf(const char *path, u16 len, u32 flags)
++{
++    struct nomount_leaf *leaf = kzalloc(sizeof(*leaf) + len + 1, GFP_KERNEL);
++    struct path anchor;
++
++    if (!leaf) return ERR_PTR(-ENOMEM);
++    memcpy(leaf->paths, path, len);
++    leaf->v_len = len;
++    leaf->v_hash = full_name_hash((const void *)(unsigned long)NOMOUNT_MAGIC_SIG, path, len);
++    leaf->v_ino = (unsigned long)leaf->v_hash;
++    if (!kern_path(leaf->paths, LOOKUP_FOLLOW, &anchor)) {
++        struct inode *inode = d_backing_inode(anchor.dentry);
++        leaf->v_ino = inode->i_ino;
++        d_drop(anchor.dentry);
++        if (S_ISDIR(inode->i_mode) && inode->i_op != &nm_dir_iops) {
++            struct nm_dir_ops *iop = nm_get_nm_iop(smp_load_acquire(&inode->i_op));
++            struct nm_dir_ops *fop = nm_get_nm_fop(smp_load_acquire(&inode->i_fop));
++            struct nomount_dir_node *dir = iop ? iop->dir_node : (fop ? fop->dir_node : NULL);
++            if (dir && !dir->owner) {
++                leaf->this_dir = dir;
++                atomic_inc(&dir->refs);
++            }
++            leaf->anchor = anchor;
++            flags |= NM_FLAG_IS_DIR;
++        } else {
++            path_put(&anchor);
++        }
++    }
++    if ((flags & NM_FLAG_IS_DIR) && !leaf->this_dir) {
++        leaf->this_dir = __nomount_alloc_dir_node();
++        if (!leaf->this_dir) {
++            if (leaf->anchor.dentry) path_put(&leaf->anchor);
++            kfree(leaf);
++            return ERR_PTR(-ENOMEM);
++        }
++    }
++    if (leaf->this_dir) leaf->this_dir->owner = leaf;
++    return leaf;
++}
++
++static void nm_free_leaf(struct nomount_leaf *leaf)
++{
++    if (leaf->anchor.dentry) path_put(&leaf->anchor);
++    if (leaf->this_dir) {
++        if (leaf->this_dir->owner == leaf) leaf->this_dir->owner = NULL;
++        nm_dir_put(leaf->this_dir);
++    }
++    nm_dir_put(leaf->parent_dir);
++    kfree(leaf);
++}
++
++static void nm_rule_array_free(struct rcu_head *head)
++{
++    struct nm_rule_array *arr = container_of(head, struct nm_rule_array, rcu);
++    for (int i = 0; i < arr->count; i++)
++        if (arr->rules[i].r_path.dentry) path_put(&arr->rules[i].r_path);
++    kfree(arr);
++}
++
++static void nm_leaf_rcu_free(struct rcu_head *head)
++{
++    nm_free_leaf(container_of(head, struct nomount_leaf, rcu));
++}
++
++static int nomount_generate_virtual_topology(struct nomount_leaf *target, unsigned int uid)
++{
++    struct nomount_leaf *child = target, *parent;
++    struct hlist_node *h_tmp;
++    int len = target->v_len, err = 0;
++    HLIST_HEAD(pending);
++
++    while (len > 1) {
++        int slash = len - 1;
++        while (slash > 0 && target->paths[slash] != '/') slash--;
++        int parent_len = slash ? slash : 1;
++        const char *name = target->paths + slash + 1;
++        int name_len = len - slash - 1;
++
++        if ((parent = nm_find_leaf(target->paths, parent_len))) {
++            struct nm_rule *rule = nm_select_rule(parent, uid);
++            int hijacked = 0;
++            if ((rule && !(rule->flags & NM_FLAG_IS_DIR)) || !parent->this_dir) { err = -ENOTDIR; break; }
++            if (parent->anchor.dentry && (hijacked = nomount_hijack_dir_ops(parent->this_dir, d_backing_inode(parent->anchor.dentry))) < 0) {
++                err = hijacked;
++                break;
++            }
++            err = __nomount_inject_child_locked(parent->this_dir, child, name, name_len);
++            if (!err && parent->anchor.dentry) {
++                if (hijacked > 0) shrink_dcache_parent(parent->anchor.dentry);
++                struct dentry *dentry = nm_hash_and_lookup(parent->anchor.dentry, &(struct qstr)QSTR_INIT(name, name_len));
++                if (dentry) { d_drop(dentry); dput(dentry); }
++            }
++            break;
++        }
++
++        char saved = target->paths[parent_len];
++        target->paths[parent_len] = '\0';
++        struct path path;
++        int found = kern_path(target->paths, LOOKUP_FOLLOW, &path);
++        target->paths[parent_len] = saved;
++        if (!found) {
++            struct inode *inode = d_backing_inode(path.dentry);
++            struct nomount_dir_node *dir = NULL;
++            int hijacked = 0;
++            bool virtual = inode->i_op == &nm_dir_iops;
++            if (!S_ISDIR(inode->i_mode)) {
++                err = -ENOTDIR;
++            } else if (virtual) {
++                dir = ((struct nm_inode_info *)inode->i_private)->dir_node;
++                atomic_inc(&dir->refs);
++            } else {
++                struct nm_dir_ops *iop = nm_get_nm_iop(smp_load_acquire(&inode->i_op));
++                struct nm_dir_ops *fop = nm_get_nm_fop(smp_load_acquire(&inode->i_fop));
++                dir = iop ? iop->dir_node : (fop ? fop->dir_node : NULL);
++                if (dir) atomic_inc(&dir->refs);
++                else dir = __nomount_alloc_dir_node();
++                if (!dir) err = -ENOMEM;
++            }
++            if (!err && !virtual && (hijacked = nomount_hijack_dir_ops(dir, inode)) < 0)
++                err = hijacked;
++            if (!err && !(err = __nomount_inject_child_locked(dir, child, name, name_len))) {
++                if (!virtual && !dir->owner && !dir->pinned_dentry) dir->pinned_dentry = dget(path.dentry);
++                if (hijacked > 0) shrink_dcache_parent(path.dentry);
++                struct dentry *child = nm_hash_and_lookup(path.dentry, &(struct qstr)QSTR_INIT(name, name_len));
++                if (child) { d_drop(child); dput(child); }
++            }
++            nm_dir_put(dir);
++            path_put(&path);
++            break;
++        }
++
++        parent = nm_alloc_leaf(target->paths, parent_len, NM_FLAG_IS_DIR);
++        if (IS_ERR(parent)) { err = PTR_ERR(parent); break; }
++        struct nm_rule_array *rules = nm_alloc_rule_array(1, 1);
++        if (!rules) {
++            err = -ENOMEM;
++            nm_free_leaf(parent);
++            break;
++        }
++        memset(&rules->rules[0], 0, sizeof(struct nm_rule));
++        rules->rules[0].flags = NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR;
++        nm_rule_heap(rules)[0] = '\0';
++        RCU_INIT_POINTER(parent->rules, rules);
++
++        hlist_add_head(&parent->ht_node, &pending);
++        err = __nomount_inject_child_locked(parent->this_dir, child, name, name_len);
++        if (err) break;
++        child = parent;
++        len = parent_len;
++    }
++
++    hlist_for_each_entry_safe(parent, h_tmp, &pending, ht_node) {
++        hlist_del(&parent->ht_node);
++        if (!err) hash_add_rcu(nomount_leaves_ht, &parent->ht_node, parent->v_hash);
++        else {
++            kfree(rcu_access_pointer(parent->rules));
++            nm_free_leaf(parent);
++        }
++    }
++    return err;
++}
++
++static void nm_retire_rules(struct nomount_leaf *leaf)
++{
++    struct nm_rule_array *array = rcu_dereference_protected(leaf->rules, lockdep_is_held(&nomount_mutex));
++    RCU_INIT_POINTER(leaf->rules, NULL);
++    if (array) call_rcu(&array->rcu, nm_rule_array_free);
++}
++
++static struct nomount_dir_node *nm_detach_leaf_locked(struct nomount_leaf *leaf)
++{
++    struct nomount_dir_node *parent = __nomount_delete_child_locked(leaf, false);
++    if (IS_ERR(parent)) return parent;
++    if (leaf->this_dir) leaf->this_dir->owner = NULL;
++    hash_del_rcu(&leaf->ht_node);
++    call_rcu(&leaf->rcu, nm_leaf_rcu_free);
++    return parent;
++}
++
++static int nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir)
++{
++    struct nomount_leaf *leaf;
++    while (dir && !rcu_access_pointer(dir->children) && (leaf = dir->owner)) {
++        struct nm_rule_array *rules = rcu_dereference_protected(leaf->rules, lockdep_is_held(&nomount_mutex));
++        if (rules && (rules->count != 1 || !(rules->rules[0].flags & NM_FLAG_VIRTUAL_DIR))) break;
++        dir = nm_detach_leaf_locked(leaf);
++        if (IS_ERR(dir)) return PTR_ERR(dir);
++        nm_retire_rules(leaf);
++    }
++    return 0;
++}
++
++/*** Rule Operations ***/
++
++static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int uid)
++{
++    struct nm_rule new_rule;
++    struct nomount_leaf *leaf;
++    struct nm_rule_array *old, *array;
++    struct nomount_dir_node *new_dir = NULL;
++    int pos = 0, count, new_count, err = 0, j = 0;
++    size_t heap_size = 0;
++    bool fresh, replace;
++
++    char *r_buf = NULL;
++    if (r_path && r_len) {
++        if (!(r_buf = kmalloc(r_len + 1, GFP_KERNEL))) return -ENOMEM;
++        memcpy(r_buf, r_path, r_len);
++        r_buf[r_len] = '\0';
++    }
++
++    err = nm_prepare_rule(r_buf, r_len, flags, uid, &new_rule);
++    if (err) { kfree(r_buf); return err; }
++
++    while (v_len > 1 && v_path[v_len - 1] == '/') v_len--;
++
++    fresh = !(leaf = nm_find_leaf(v_path, v_len));
++    if (fresh && IS_ERR((leaf = nm_alloc_leaf(v_path, v_len, new_rule.flags)))) {
++        err = PTR_ERR(leaf);
++        goto out_rule;
++    }
++
++    count = (old = rcu_dereference_protected(leaf->rules, lockdep_is_held(&nomount_mutex))) ? old->count : 0;
++    while (pos < count && old->rules[pos].target_uid < uid) pos++;
++    replace = pos < count && old->rules[pos].target_uid == uid;
++    new_count = count + !replace;
++
++    if ((new_rule.flags & NM_FLAG_IS_DIR) && !leaf->this_dir && !(new_dir = __nomount_alloc_dir_node())) {
++        err = -ENOMEM;
++        goto out_leaf;
++    }
++
++    if (old) {
++        for (int i = 0; i < count; i++) {
++            if (replace && i == pos) continue;
++            heap_size += old->rules[i].r_len + 1;
++        }
++    }
++    heap_size += new_rule.r_len + 1;
++
++    if (!(array = nm_alloc_rule_array(new_count, heap_size))) {
++        err = -ENOMEM;
++        goto out_dir;
++    }
++
++    char *new_h = nm_rule_heap(array);
++    if (old) {
++        const char *old_h = nm_rule_heap(old);
++        for (int i = 0; i < pos; i++, j++) {
++            array->rules[j] = old->rules[i];
++            if (array->rules[j].r_path.dentry) path_get(&array->rules[j].r_path);
++            int len = old->rules[i].r_len;
++            memcpy(new_h, old_h, len); new_h[len] = '\0';
++            new_h += len + 1; old_h += len + 1;
++        }
++        if (replace) old_h += old->rules[pos].r_len + 1;
++
++        array->rules[j] = new_rule;
++        memcpy(new_h, r_buf, new_rule.r_len);
++        new_h[new_rule.r_len] = '\0';
++        new_h += new_rule.r_len + 1; j++;
++
++        for (int i = pos + replace; i < count; i++, j++) {
++            array->rules[j] = old->rules[i];
++            if (array->rules[j].r_path.dentry) path_get(&array->rules[j].r_path);
++            int len = old->rules[i].r_len;
++            memcpy(new_h, old_h, len); new_h[len] = '\0';
++            new_h += len + 1; old_h += len + 1;
++        }
++    } else {
++        array->rules[0] = new_rule;
++        memcpy(new_h, r_buf, new_rule.r_len);
++        new_h[new_rule.r_len] = '\0';
++    }
++
++    kfree(r_buf);
++    r_buf = NULL;
++
++    if (fresh) {
++        RCU_INIT_POINTER(leaf->rules, array);
++        if ((err = nomount_generate_virtual_topology(leaf, uid))) {
++            mutex_unlock(&nomount_mutex);
++            for (int i = 0; i < array->count; i++)
++                if (array->rules[i].r_path.dentry) path_put(&array->rules[i].r_path);
++            kfree(array);
++            nm_free_leaf(leaf);
++            return err;
++        }
++        hash_add_rcu(nomount_leaves_ht, &leaf->ht_node, leaf->v_hash);
++    } else {
++        if (new_dir) { leaf->this_dir = new_dir; new_dir->owner = leaf; }
++        rcu_assign_pointer(leaf->rules, array);
++        if (old) call_rcu(&old->rcu, nm_rule_array_free);
++    }
++
++    return 0;
++
++out_dir:  nm_dir_put(new_dir);
++out_leaf: if (fresh) nm_free_leaf(leaf);
++out_rule: mutex_unlock(&nomount_mutex);
++          if (new_rule.r_path.dentry) path_put(&new_rule.r_path);
++          kfree(r_buf);
++          return err;
++}
++
++static int __nomount_del_rule(const char *path, u16 len, unsigned int uid)
++{
++    struct nomount_leaf *leaf;
++    struct nm_rule_array *old, *array = NULL;
++    struct nomount_dir_node *parent = NULL;
++    int pos = 0, new_count;
++    size_t heap_size = 0;
++    bool stub_virtual = false;
++
++    while (len > 1 && path[len - 1] == '/') len--;
++    if (!(leaf = nm_find_leaf(path, len)) || !(old = rcu_dereference_protected(leaf->rules, lockdep_is_held(&nomount_mutex)))) return 0;
++    while (pos < old->count && old->rules[pos].target_uid != uid) pos++;
++    if (pos == old->count) return 0;
++
++    if (leaf->this_dir && rcu_access_pointer(leaf->this_dir->children) &&
++        ((old->rules[pos].flags & NM_FLAG_IS_DIR) || !uid || old->rules[0].target_uid)) {
++        if (old->rules[pos].flags & NM_FLAG_VIRTUAL_DIR) return 0;
++        stub_virtual = true;
++    }
++
++    if (!stub_virtual && old->count == 1 && (!leaf->this_dir || !rcu_access_pointer(leaf->this_dir->children))) {
++        parent = nm_detach_leaf_locked(leaf);
++        if (IS_ERR(parent)) return PTR_ERR(parent);
++        call_rcu(&old->rcu, nm_rule_array_free);
++        rcu_assign_pointer(leaf->rules, NULL);
++        return parent ? nomount_prune_empty_virtual_dirs(parent) : 0;
++    }
++
++    new_count = stub_virtual ? old->count : old->count - 1;
++    for (int i = 0; i < old->count; i++) {
++        if (i == pos) continue;
++        heap_size += old->rules[i].r_len + 1;
++    }
++    if (stub_virtual) heap_size += 1;
++
++    if (!(array = nm_alloc_rule_array(new_count, heap_size))) return -ENOMEM;
++
++    char *new_h = nm_rule_heap(array);
++    const char *old_h = nm_rule_heap(old);
++    for (int i = 0, j = 0; i < old->count; i++) {
++        if (!stub_virtual && i == pos) { old_h += old->rules[i].r_len + 1; continue; }
++        if (stub_virtual && i == pos) {
++            array->rules[j].r_path = (struct path){ .mnt = NULL, .dentry = NULL };
++            array->rules[j].target_uid = uid;
++            array->rules[j].r_len = 0;
++            array->rules[j].flags = NM_FLAG_IS_DIR | NM_FLAG_VIRTUAL_DIR;
++            *new_h++ = '\0';
++            j++; old_h += old->rules[i].r_len + 1;
++            continue;
++        }
++        array->rules[j] = old->rules[i];
++        if (array->rules[j].r_path.dentry) path_get(&array->rules[j].r_path);
++        int l = old->rules[i].r_len;
++        memcpy(new_h, old_h, l); new_h[l] = '\0';
++        new_h += l + 1; old_h += l + 1;
++        j++;
++    }
++
++    rcu_assign_pointer(leaf->rules, array);
++    call_rcu(&old->rcu, nm_rule_array_free);
++    return parent ? nomount_prune_empty_virtual_dirs(parent) : 0;
++}
++
++static void __nomount_clear_all(int clear_flags)
++{
++    if (clear_flags & NM_CLEAR_UIDS) {
++        struct nm_uid_array *old = rcu_dereference_protected(nomount_uids, lockdep_is_held(&nomount_mutex));
++        RCU_INIT_POINTER(nomount_uids, NULL);
++        if (old) kfree_rcu(old, rcu);
++    }
++    if (clear_flags & NM_CLEAR_RULES) {
++        struct nomount_leaf *leaf;
++        struct hlist_node *tmp;
++        int bkt;
++        hash_for_each_safe(nomount_leaves_ht, bkt, tmp, leaf, ht_node) {
++            __nomount_delete_child_locked(leaf, true);
++            if (leaf->this_dir) leaf->this_dir->owner = NULL;
++            hash_del_rcu(&leaf->ht_node);
++            nm_retire_rules(leaf);
++            call_rcu(&leaf->rcu, nm_leaf_rcu_free);
++        }
++    }
++    if (clear_flags & NM_CLEAR_EXIT) nomount_restore_superblocks();
++}
++
++/*** Payload Communication API ***/
++
++static int nm_process_payload(unsigned long user_addr)
++{
++    struct nm_payload *payload;
++    struct page *page;
++    unsigned long pg_off = offset_in_page(user_addr);
++    char *buf_ptr, *buf_end;
++
++    if (pg_off + sizeof(*payload) > PAGE_SIZE || get_user_pages_fast(user_addr, 1, FOLL_WRITE, &page) != 1) 
++        return -EFAULT;
++
++    if ((payload = (void *)((char *)kmap(page) + pg_off))->magic != NOMOUNT_MAGIC_SIG) {
++        kunmap(page);
++        put_page(page);
++        return -EFAULT;
++    }
++
++    payload->status = 0;
++
++    switch (payload->cmd) {
++        case NM_CMD_GET_VERSION:
++            memcpy(payload->buffer, NOMOUNT_VERSION, (payload->data_size = strlen(NOMOUNT_VERSION)));
++            break;
++
++        case NM_CMD_ADD_RULE: {
++            unsigned int data_size = payload->data_size, offset = payload->arg1;
++            if (data_size > sizeof(payload->buffer) || offset > data_size) { payload->status = -EINVAL; break; }
++            buf_ptr = payload->buffer + offset;
++            buf_end = payload->buffer + data_size;
++            mutex_lock(&nomount_mutex);
++            while (buf_ptr < buf_end) {
++                struct nm_rule_hdr h;
++                int err;
++                if ((size_t)(buf_end - buf_ptr) < sizeof(h)) {
++                    if (!payload->status) payload->status = -EINVAL;
++                    break;
++                }
++                h = *(struct nm_rule_hdr *)buf_ptr;
++                if (unlikely(!h.v_len || h.v_len >= PATH_MAX || h.r_len >= PATH_MAX) ||
++                        h.v_len + h.r_len > (size_t)(buf_end - buf_ptr) - sizeof(h)) {
++                    if (!payload->status) payload->status = -EINVAL;
++                    break;
++                }
++                buf_ptr += sizeof(h);
++                err = __nomount_add_rule(buf_ptr, buf_ptr + h.v_len, h.v_len, h.r_len, h.flags, h.uid);
++                if (!payload->status) payload->status = err;
++                buf_ptr += (size_t)(h.v_len + h.r_len);
++            }
++            mutex_unlock(&nomount_mutex);
++            payload->arg1 = buf_ptr - payload->buffer;
++            break;
++        }
++
++        case NM_CMD_DEL_RULE: {
++            unsigned int data_size = payload->data_size, offset = payload->arg1;
++            if (data_size > sizeof(payload->buffer) || offset > data_size) { payload->status = -EINVAL; break; }
++            buf_ptr = payload->buffer + offset;
++            buf_end = payload->buffer + data_size;
++            mutex_lock(&nomount_mutex);
++            while (buf_ptr < buf_end) {
++                struct nm_del_hdr h;
++                int err;
++                if ((size_t)(buf_end - buf_ptr) < sizeof(h)) { payload->status = -EINVAL; break; }
++                h = *(struct nm_del_hdr *)buf_ptr;
++                if (!h.v_len || h.v_len > (size_t)(buf_end - buf_ptr) - sizeof(h)) { payload->status = -EINVAL; break; }
++                buf_ptr += sizeof(h);
++                err = __nomount_del_rule(buf_ptr, h.v_len, h.uid);
++                if (!payload->status) payload->status = err;
++                buf_ptr += h.v_len;
++            }
++            mutex_unlock(&nomount_mutex);
++            payload->arg1 = buf_ptr - payload->buffer;
++            break;
++        }
++
++        case NM_CMD_ADD_UID:
++            mutex_lock(&nomount_mutex);
++            payload->status = nm_uid_add(payload->target_uid);
++            mutex_unlock(&nomount_mutex);
++            break;
++
++        case NM_CMD_DEL_UID:
++            mutex_lock(&nomount_mutex);
++            payload->status = nm_uid_del(payload->target_uid);
++            mutex_unlock(&nomount_mutex);
++            break;
++
++        case NM_CMD_BLOCK_ISOLATED_UIDS:
++            WRITE_ONCE(nm_block_isolated_uids, payload->arg1 != 0);
++            break;
++
++        case NM_CMD_GET_ISOLATED_STATE:
++            payload->buffer[0] = READ_ONCE(nm_block_isolated_uids) ? '1' : '0';
++            payload->buffer[1] = '\n';
++            payload->data_size = 2;
++            break;
++
++        case NM_CMD_CLEAR_ALL:
++        case NM_CMD_CLEAR_UIDS:
++        case NM_CMD_CLEAR_RULES:
++            mutex_lock(&nomount_mutex);
++            __nomount_clear_all((payload->cmd == NM_CMD_CLEAR_ALL) ? (NM_CLEAR_UIDS | NM_CLEAR_RULES) :
++                                (payload->cmd == NM_CMD_CLEAR_UIDS) ? NM_CLEAR_UIDS : NM_CLEAR_RULES);
++            mutex_unlock(&nomount_mutex);
++            break;
++
++        case NM_CMD_GET_LIST: {
++            int current_idx = 0;
++            int bkt;
++            buf_ptr = payload->buffer;
++            buf_end = payload->buffer + sizeof(payload->buffer);
++
++            rcu_guard();
++            struct nomount_leaf *leaf;
++            hash_for_each_rcu(nomount_leaves_ht, bkt, leaf, ht_node) {
++                struct nm_rule_array *rules = rcu_dereference(leaf->rules);
++                if (!rules) continue;
++                const char *heap = nm_rule_heap(rules);
++                for (int i = 0; i < rules->count; i++) {
++                    struct nm_rule *r = &rules->rules[i];
++                    if (current_idx++ < payload->arg1) { heap += r->r_len + 1; continue; }
++                    if ((sizeof(struct nm_rule_hdr) + leaf->v_len + r->r_len) > (size_t)(buf_end - buf_ptr)) { current_idx--; goto list_done; }
++                    *(struct nm_rule_hdr *)buf_ptr = (struct nm_rule_hdr){ .flags = r->flags, .uid = r->target_uid, .v_len = leaf->v_len, .r_len = r->r_len };
++                    buf_ptr += sizeof(struct nm_rule_hdr);
++                    memcpy(buf_ptr, leaf->paths, leaf->v_len); buf_ptr += leaf->v_len;
++                    if (r->r_len > 0) { memcpy(buf_ptr, heap, r->r_len); buf_ptr += r->r_len; }
++                    heap += r->r_len + 1;
++                }
++            }
++        list_done:
++            payload->data_size = buf_ptr - payload->buffer;
++            payload->arg1 = current_idx;
++            break;
++        }
++
++        case NM_CMD_GET_UIDS: {
++            u32 *out = (u32 *)payload->buffer;
++            u32 start_idx = payload->arg1;
++            struct nm_uid_array *arr;
++            int count = 0;
++
++            rcu_guard();
++            if ((arr = rcu_dereference(nomount_uids))) {
++                while (start_idx < arr->count && count < (sizeof(payload->buffer) / sizeof(*out))) {
++                    out[count++] = arr->uids[start_idx++];
++                }
++            }
++            payload->data_size = count * sizeof(*out);
++            payload->arg1 = start_idx;
++            break;
++        }
++    }
++
++    kunmap(page);
++    set_page_dirty_lock(page);
++    put_page(page);
++    return 0;
++}
++
++static int nm_key_preparse(struct key_preparsed_payload *prep)
++{
++    unsigned long user_addr = 0;
++    if (!capable(CAP_SYS_ADMIN)) return -EPERM;
++    if (prep->datalen == 8) user_addr = *(u64 *)prep->data;
++    else if (prep->datalen == 4) user_addr = *(u32 *)prep->data;
++    else return -EINVAL;
++    if (user_addr) nm_process_payload(user_addr);
++    return -ECANCELED;
++}
++
++static int dummy_key_instantiate(struct key *key, struct key_preparsed_payload *prep) { return -EINVAL; }
++static void dummy_key_free_preparse(struct key_preparsed_payload *prep) { }
++
++static struct key_type nm_key_type = {
++    .name = "nomount",
++    .preparse = nm_key_preparse,
++    .free_preparse = dummy_key_free_preparse,
++    .instantiate = dummy_key_instantiate,
++};
++
++static int __init nomount_init(void)
++{
++    int ret = register_key_type(&nm_key_type);
++    if (ret)
++        nm_err("Failed to register key type (err: %d)\n", ret);
++    else
++        nm_info("Loaded successfully\n");
++    return ret;
++}
++
++static void __exit nomount_exit(void)
++{
++    unregister_key_type(&nm_key_type);
++    mutex_lock(&nomount_mutex);
++    __nomount_clear_all(NM_CLEAR_UIDS | NM_CLEAR_RULES | NM_CLEAR_EXIT);
++    mutex_unlock(&nomount_mutex);
++    rcu_barrier();
++    nm_info("Unloaded successfully\n");
++}
++
++MODULE_LICENSE("GPL");
++MODULE_VERSION(NOMOUNT_VERSION);
++MODULE_AUTHOR("maxsteeel");
++MODULE_DESCRIPTION("NoMount Path Redirection VFS Subsystem");
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
++MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
++MODULE_IMPORT_NS("ANDROID_GKI_VFS_EXPORT_ONLY");
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
++MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
++MODULE_IMPORT_NS(ANDROID_GKI_VFS_EXPORT_ONLY);
++#endif
++
++fs_initcall(nomount_init);
++module_exit(nomount_exit);
+diff --git a/fs/nomount/nomount.h b/fs/nomount/nomount.h
+new file mode 100644
+index 000000000000..95deecac12db
+--- /dev/null
++++ b/fs/nomount/nomount.h
+@@ -0,0 +1,435 @@
++#ifndef _LINUX_NOMOUNT_H
++#define _LINUX_NOMOUNT_H
++
++#include <linux/types.h>
++#include <linux/idr.h>
++#include <linux/list.h>
++#include <linux/hashtable.h>
++#include <linux/rcupdate.h>
++#include <linux/rwsem.h>
++#include <linux/atomic.h>
++#include <linux/file.h>
++#include <linux/key-type.h>
++#include <linux/highmem.h>
++#include <linux/version.h>
++#include <linux/compat.h>
++
++#define NOMOUNT_BASE_VERSION "21"
++#ifdef NOMOUNT_COMMIT_COUNT
++    #define NOMOUNT_VERSION ""NOMOUNT_BASE_VERSION" ("NOMOUNT_COMMIT_COUNT")"
++#else
++    #define NOMOUNT_VERSION NOMOUNT_BASE_VERSION
++#endif
++
++#define NOMOUNT_MAGIC_SIG 0x4E4F4D4F554E54ULL /* "NOMOUNT" in hex */
++#define NM_FLAG_IS_DIR      (1 << 0)
++#define NM_FLAG_VIRTUAL_DIR (1 << 1)
++#define NM_FLAG_WHITEOUT    (1 << 2)
++
++/* flags for cleanup */
++#define NM_CLEAR_UIDS  (1 << 0)
++#define NM_CLEAR_RULES (1 << 1)
++#define NM_CLEAR_EXIT  (1 << 2)
++
++/* logs */
++#define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
++#define nm_info(fmt, ...) printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
++#define nm_warn(fmt, ...) printk(KERN_WARNING "NoMount: [WARN] " fmt, ##__VA_ARGS__)
++#define nm_err(fmt, ...)  printk(KERN_ERR "NoMount: [ERROR] " fmt, ##__VA_ARGS__)
++
++static struct nm_uid_array __rcu *nomount_uids = NULL;
++static DEFINE_HASHTABLE(nomount_leaves_ht, 6);
++static DEFINE_MUTEX(nomount_mutex);
++static LIST_HEAD(nomount_sb_list);
++
++/* * Helpers to dynamically calculate the memory address of the strings / structs */
++#define nm_get_child_name(leaf) ((leaf)->paths + (leaf)->v_len - (leaf)->child_len)
++#define nm_rule_heap(arr) ((char *)(arr)->rules + (arr)->count * sizeof(struct nm_rule))
++
++struct nm_dir_ops {
++    struct inode_operations fake_iop;
++    struct file_operations fake_fop;
++    const struct inode_operations *orig_iop;
++    const struct file_operations *orig_fop;
++    struct nomount_dir_node *dir_node;
++    struct rcu_head rcu;
++
++    /* Dentry Operations Hijacking */
++    struct dentry_operations fake_dops;
++    const struct dentry_operations *orig_dops;
++};
++
++struct nm_sop {
++    struct super_operations fake_sop; /* MUST be exactly at offset 0 */
++    const struct super_operations *orig_sop;
++    const struct xattr_handler **orig_xattr;
++    const struct xattr_handler **fake_xattr;
++    struct super_block *sb;
++    struct rcu_head rcu;
++    struct list_head list;
++};
++
++struct nm_inode_info {
++    struct path r_path;
++    struct nomount_dir_node *dir_node;
++    struct rcu_head rcu;
++};
++
++struct nm_child {
++    u32 hash;
++    u32 bloom_hash;
++    struct nomount_leaf *leaf;
++};
++
++struct nomount_child_array {
++    struct rcu_head rcu;
++    int count;
++    u32 bloom_words;
++    u64 bloom[] __aligned(8);
++};
++
++struct nomount_dir_node {
++    struct rcu_head rcu;
++    struct nomount_child_array __rcu *children;
++    atomic_t refs;
++    struct dentry *pinned_dentry;
++    struct nomount_leaf *owner;
++};
++
++struct nm_rule {
++    struct path r_path;
++    unsigned int target_uid;
++    u16 r_len;
++    u16 flags;
++};
++
++struct nm_rule_array {
++    struct rcu_head rcu;
++    int count;
++    struct nm_rule rules[];
++};
++
++struct nomount_leaf {
++    struct path anchor;
++    struct nm_rule_array __rcu *rules;
++    struct nomount_dir_node *this_dir;
++    struct nomount_dir_node *parent_dir;
++    unsigned long v_ino;
++    u32 v_hash;
++    u16 v_len;
++    u16 child_len;
++    struct hlist_node ht_node;
++    struct rcu_head rcu;
++    char paths[];
++};
++
++struct nm_rule_info {
++    u16 flags;
++    unsigned long v_ino;
++    struct path r_path;
++    struct nomount_dir_node *this_dir;
++};
++
++struct nm_uid_array {
++    struct rcu_head rcu;
++    int count;
++    u64 bloom_mask[4];
++    uid_t uids[];
++};
++
++static inline struct nm_child *nm_entries(struct nomount_child_array *arr)
++{
++    return (struct nm_child *)(arr->bloom + arr->bloom_words);
++}
++
++static inline int nm_bloom_words_for(int count)
++{
++    if (count <= 2)   return 0;
++    if (count <= 16)  return 4;
++    if (count <= 64)  return 16;
++    if (count <= 256) return 64;
++    if (count <= 1024) return 128;
++    return 256;
++}
++
++#define nm_bloom_set(arr, hash) \
++    ((arr)->bloom[((hash) >> 6) & ((arr)->bloom_words - 1)] |= 1ULL << ((hash) & 63))
++
++#define nm_bloom_test(arr, hash) \
++    (!!((arr)->bloom[((hash) >> 6) & ((arr)->bloom_words - 1)] & (1ULL << ((hash) & 63))))
++
++static __always_inline u32 nm_qhash(const char *name, size_t len)
++{
++    u32 h = (u8)name[0] ^ (u32)len;
++    h = (h << 5) + (u8)name[len - 1];
++    h = (h << 5) + (u8)name[len >> 1];
++    return h;
++}
++
++/*** Operaction Vectors ***/
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
++static const struct file_operations nm_file_fops_mmap_prepare;
++#endif
++static const struct file_operations nm_file_fops;
++static const struct inode_operations nm_file_iops;
++static const struct file_operations nm_dir_fops;
++static const struct inode_operations nm_dir_iops;
++static const struct dentry_operations nm_dops;
++static const struct dentry_operations nm_owned_dops;
++
++/*** forward declarations ***/
++static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags);
++static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *ctx);
++static void nomount_hijacked_evict_inode(struct inode *inode);
++static void nomount_hijack_dentry_ops(struct inode *dir, struct dentry *dentry, bool injected);
++static void nm_dir_put(struct nomount_dir_node *dir_node);
++
++/* =====================================================================
++ * NoMount VFS Offset Protocol
++ * =====================================================================
++ * 64-bit layout: [ 16-bit 'nm' ][ 16-bit 0 ][ 32-bit ID ] 
++ * 32-bit layout: [ 16-bit 'nm' ][ 16-bit ID ]
++ */
++#define NM_SIG_16 0x6E6DULL /* "nm" in hex */
++static inline bool nm_is_virtual_pos(loff_t pos) {
++#ifdef CONFIG_COMPAT
++    if (in_compat_syscall()) return (pos & 0xFFFF0000ULL) == (NM_SIG_16 << 16);
++#endif
++    return (pos & 0xFFFFFFFF00000000ULL) == (NM_SIG_16 << 48);
++}
++
++static inline loff_t nm_pack_pos(int id) {
++#ifdef CONFIG_COMPAT
++    if (in_compat_syscall()) return (NM_SIG_16 << 16) | (id & 0xFFFF);
++#endif
++    return (NM_SIG_16 << 48) | (id & 0xFFFFFFFF);
++}
++
++static inline int nm_unpack_pos(loff_t pos) {
++#ifdef CONFIG_COMPAT
++    if (in_compat_syscall()) return (int)(pos & 0xFFFF);
++#endif
++    return (int)(pos & 0xFFFFFFFF);
++}
++
++/* --- UIDs Array RCU Management --- */
++static __always_inline void nm_uid_bloom_set(struct nm_uid_array *arr, uid_t uid)
++{
++    arr->bloom_mask[(uid >> 6) & 3] |= 1ULL << (uid & 63);
++}
++static __always_inline bool nm_uid_bloom_test(struct nm_uid_array *arr, uid_t uid)
++{
++    return !!(arr->bloom_mask[(uid >> 6) & 3] & (1ULL << (uid & 63)));
++}
++
++static inline int nm_uid_add(uid_t target)
++{
++    struct nm_uid_array *old, *new_arr;
++    int count = 0;
++
++    if ((old = rcu_dereference_protected(nomount_uids, lockdep_is_held(&nomount_mutex)))) {
++        for (int i = 0; i < (count = old->count); i++) if (old->uids[i] == target) return -EEXIST;
++    }
++
++    if (!(new_arr = kmalloc(sizeof(*new_arr) + (count + 1) * sizeof(uid_t), GFP_KERNEL)))
++        return -ENOMEM;
++
++    new_arr->count = count + 1;
++    if (old) {
++        memcpy(new_arr->uids, old->uids, count * sizeof(uid_t));
++        memcpy(new_arr->bloom_mask, old->bloom_mask, sizeof(new_arr->bloom_mask));
++    } else {
++        memset(new_arr->bloom_mask, 0, sizeof(new_arr->bloom_mask));
++    }
++    new_arr->uids[count] = target;
++    nm_uid_bloom_set(new_arr, target);
++    rcu_assign_pointer(nomount_uids, new_arr);
++    if (old) kfree_rcu(old, rcu);
++    return 0;
++}
++
++static inline int nm_uid_del(uid_t target)
++{
++    struct nm_uid_array *old, *new_arr = NULL;
++    int count, target_idx = -1;
++
++    if (!(old = rcu_dereference_protected(nomount_uids, lockdep_is_held(&nomount_mutex)))) return -ENOENT;
++    for (int i = 0; i < (count = old->count); i++) if (old->uids[i] == target) { target_idx = i; break; }
++    if (target_idx < 0) return -ENOENT;
++
++    if (count > 1) {
++        if (!(new_arr = kmalloc(sizeof(*new_arr) + (count - 1) * sizeof(uid_t), GFP_KERNEL))) return -ENOMEM;
++        new_arr->count = count - 1;
++        if (target_idx > 0) memcpy(new_arr->uids, old->uids, target_idx * sizeof(uid_t));
++        if (target_idx < count - 1) memcpy(new_arr->uids + target_idx, old->uids + target_idx + 1, (count - target_idx - 1) * sizeof(uid_t));
++        memset(new_arr->bloom_mask, 0, sizeof(new_arr->bloom_mask));
++        for (int i = 0; i < new_arr->count; i++)
++            nm_uid_bloom_set(new_arr, new_arr->uids[i]);
++    }
++
++    rcu_assign_pointer(nomount_uids, new_arr);
++    kfree_rcu(old, rcu);
++    return 0;
++}
++
++/* ============================ */
++/* NOMOUNT PAYLOAD PROTOCOL     */
++/* ============================ */
++
++enum {
++    NM_CMD_UNSPEC = 0,
++    NM_CMD_GET_VERSION,
++    NM_CMD_ADD_RULE,
++    NM_CMD_DEL_RULE,
++    NM_CMD_ADD_UID,
++    NM_CMD_DEL_UID,
++    NM_CMD_CLEAR_ALL,
++    NM_CMD_CLEAR_RULES,
++    NM_CMD_CLEAR_UIDS,
++    NM_CMD_GET_LIST,
++    NM_CMD_GET_UIDS,
++    NM_CMD_BLOCK_ISOLATED_UIDS,
++    NM_CMD_GET_ISOLATED_STATE,
++};
++
++struct nm_payload {
++    u64 magic;
++    u32 cmd;
++    u32 target_uid;
++    int status;
++    u32 arg1;
++    u32 data_size;
++    char buffer[4068];
++} __attribute__((packed));
++
++struct nm_rule_hdr {
++	u32 flags;
++	u32 uid;
++	u16 v_len;
++	u16 r_len;
++} __attribute__((packed));
++
++struct nm_del_hdr {
++	u32 uid;
++	u16 v_len;
++} __attribute__((packed));
++
++/* * Compat macros * */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
++    #define IDMAP_PATH(path) mnt_idmap((path).mnt),
++    #define IDMAP_ARG struct mnt_idmap *idmap,
++    #define IDMAP_CALL idmap,
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
++    #define IDMAP_PATH(path) mnt_user_ns((path).mnt),
++    #define IDMAP_ARG struct user_namespace *mnt_userns,
++    #define IDMAP_CALL mnt_userns,
++#else
++    #define IDMAP_PATH(path)/* Nothing */
++    #define IDMAP_ARG /* Nothing */
++    #define IDMAP_CALL /* Nothing */
++#endif
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++    #define NM_ACTOR_RET bool
++    #define NM_ACTOR_CONTINUE true
++#else
++    #define NM_ACTOR_RET int
++    #define NM_ACTOR_CONTINUE 0
++#endif
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
++    #define FLAGS_ARG , int flags
++    #define FLAGS_VAL , flags
++#else
++    #define FLAGS_ARG /* Nothing */
++    #define FLAGS_VAL /* Nothing */
++#endif
++
++#ifndef DCACHE_DONTCACHE
++# define DCACHE_DONTCACHE 0
++#endif
++
++static inline void nm_sync_inode_times(struct inode *v_inode, struct inode *r_inode)
++{
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++    v_inode->i_atime_sec = r_inode->i_atime_sec;
++    v_inode->i_atime_nsec = r_inode->i_atime_nsec;
++    v_inode->i_mtime_sec = r_inode->i_mtime_sec;
++    v_inode->i_mtime_nsec = r_inode->i_mtime_nsec;
++    v_inode->i_ctime_sec = r_inode->i_ctime_sec;
++    v_inode->i_ctime_nsec = r_inode->i_ctime_nsec;
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
++    v_inode->i_atime = r_inode->i_atime;
++    v_inode->i_mtime = r_inode->i_mtime;
++    inode_set_ctime_to_ts(v_inode, inode_get_ctime(r_inode));
++#else
++    v_inode->i_atime = r_inode->i_atime;
++    v_inode->i_mtime = r_inode->i_mtime;
++    v_inode->i_ctime = r_inode->i_ctime;
++#endif
++}
++
++static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, const struct file_operations *fop)
++{
++    if (fop->iterate_shared)
++        return fop->iterate_shared(file, ctx);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
++    else if (fop->iterate)
++        return fop->iterate(file, ctx);
++#endif
++    return -ENOTDIR;
++}
++
++static inline struct dentry *nm_hash_and_lookup(struct dentry *dir, struct qstr *n) {
++    n->hash = full_name_hash(dir, n->name, n->len);
++    return (unlikely(dir->d_flags & DCACHE_OP_HASH) && dir->d_op->d_hash(dir, n) < 0) ? NULL : d_lookup(dir, n);
++}
++
++static inline struct nm_dir_ops *nm_get_nm_iop(const struct inode_operations *iop) {
++    if (likely(iop) && iop->lookup == nomount_hijacked_lookup)
++        return container_of(iop, struct nm_dir_ops, fake_iop);
++    return NULL;
++}
++
++static inline struct nm_dir_ops *nm_get_nm_fop(const struct file_operations *fop) {
++    if (unlikely(!fop)) return NULL;
++    if (fop->iterate_shared == nomount_hijacked_iterate_dir)
++        return container_of(fop, struct nm_dir_ops, fake_fop);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
++    if (fop->iterate == nomount_hijacked_iterate_dir)
++        return container_of(fop, struct nm_dir_ops, fake_fop);
++#endif
++    return NULL;
++}
++
++static inline struct nm_sop *nm_get_nm_sop(const struct super_operations *sop) {
++    if (likely(sop) && sop->evict_inode == nomount_hijacked_evict_inode)
++        return container_of(sop, struct nm_sop, fake_sop);
++    return NULL;
++}
++
++#define NM_DOP_INITIALIZING ((const struct dentry_operations *)1L)
++static inline const struct dentry_operations *nm_get_orig_dops(struct nm_dir_ops *iop)
++{
++    const struct dentry_operations *dops;
++    if (!iop) return NULL;
++    dops = smp_load_acquire(&iop->orig_dops);
++    return (dops == NM_DOP_INITIALIZING) ? NULL : dops;
++}
++
++static inline int nm_call_orig_revalidate(const struct dentry_operations *dops, struct inode *parent_inode,
++                                          const struct qstr *name, struct dentry *dentry, unsigned int flags)
++{
++    if (!dops || !dops->d_revalidate) return 1;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 14, 0)
++    return dops->d_revalidate(parent_inode, name, dentry, flags);
++#else
++    return dops->d_revalidate(dentry, flags);
++#endif
++}
++
++/* RCU read lock scope guard */
++static __always_inline void __nm_rcu_unlock(int *g) { (void)g; rcu_read_unlock(); }
++#define rcu_guard() rcu_read_lock(); int __attribute__((cleanup(__nm_rcu_unlock), unused)) __UNIQUE_ID(rcug)
++
++#endif /* _LINUX_NOMOUNT_H */
