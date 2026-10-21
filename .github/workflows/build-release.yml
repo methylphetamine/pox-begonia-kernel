@@ -89,6 +89,12 @@ jobs:
           # patch set under variants/ is applied to the tree before building.
           APPLIED_PATCHES=""
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # MIUI and C2 both rewrite overlapping vendor media/perf code, so a
+            # combined overlay produces a tree neither downstream supports.
+            if [[ "${{ github.event.inputs.miui }}" == "true" && "${{ github.event.inputs.c2 }}" == "true" ]]; then
+              echo "::error::miui and c2 overlays are mutually exclusive - enable at most one"
+              exit 1
+            fi
             REF="${{ github.event.inputs.root }}"
             [[ "${{ github.event.inputs.miui }}" == "true" ]] && REF="${REF}-miui"
             [[ "${{ github.event.inputs.c2 }}" == "true" ]] && REF="${REF}-c2"
