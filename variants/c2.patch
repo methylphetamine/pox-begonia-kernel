@@ -44,14 +44,6 @@ index 5942141acad9..5154418aa6b7 100644
      update_userlimit_cpu_freq(CPU_KIR_PERF, CLUSTER_NUM, current_cpu_freq);
  }
  
-diff --git a/drivers/kernelsu b/drivers/kernelsu
-deleted file mode 120000
-index 9e51d0d62734..000000000000
---- a/drivers/kernelsu
-+++ /dev/null
-@@ -1 +0,0 @@
--../KernelSU/kernel
-\ No newline at end of file
 diff --git a/drivers/media/platform/Kconfig b/drivers/media/platform/Kconfig
 index ef7d39b3c3d5..4cf8c59358a8 100644
 --- a/drivers/media/platform/Kconfig

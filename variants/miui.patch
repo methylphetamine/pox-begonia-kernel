@@ -1,11 +1,3 @@
-diff --git a/drivers/kernelsu b/drivers/kernelsu
-deleted file mode 120000
-index 9e51d0d62734..000000000000
---- a/drivers/kernelsu
-+++ /dev/null
-@@ -1 +0,0 @@
--../KernelSU/kernel
-\ No newline at end of file
 diff --git a/drivers/misc/mediatek/connectivity/wlan/adaptor/wmt_cdev_wifi.c b/drivers/misc/mediatek/connectivity/wlan/adaptor/wmt_cdev_wifi.c
 index 4808f516d3dc..e39ebeef3f04 100644
 --- a/drivers/misc/mediatek/connectivity/wlan/adaptor/wmt_cdev_wifi.c
