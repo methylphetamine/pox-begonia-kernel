@@ -13,11 +13,12 @@ index 31e3c7836ff5..96438fc88b85 100644
  *.a
  *.bin
  *.bz2
-@@ -31,6 +35,7 @@
+@@ -31,7 +35,8 @@
  *.o.*
  *.order
  *.patch
 +!ksu-patches/**/*.patch
+ !variants/*.patch
  *.s
  *.so
  *.so.dbg
