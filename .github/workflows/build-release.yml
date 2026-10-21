@@ -109,6 +109,9 @@ jobs:
           else
             REF="${{ github.ref_name }}"
           fi
+          # Ensure any submodule (e.g. KernelSU, added by variants/ksun.patch) is
+          # actually checked out; git apply only creates the gitlink.
+          git submodule update --init --recursive
           export GITHUB_REF_NAME="$REF"
           export GIT_BRANCH="$REF"
           ./build.sh all
