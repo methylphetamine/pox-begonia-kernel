@@ -95,7 +95,7 @@ jobs:
             apply_patch() {
               if [[ -f "variants/$1.patch" ]]; then
                 echo "::group::Applying variants/$1.patch"
-                git apply --verbose "variants/$1.patch"
+                git apply --verbose --index "variants/$1.patch"
                 echo "::endgroup::"
               fi
             }
