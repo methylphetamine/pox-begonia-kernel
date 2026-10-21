@@ -87,6 +87,7 @@ jobs:
           # the chosen inputs are folded into GIT_BRANCH, which build.sh's
           # resolver turns into the edition name + defconfig, and the matching
           # patch set under variants/ is applied to the tree before building.
+          APPLIED_PATCHES=""
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             REF="${{ github.event.inputs.root }}"
             [[ "${{ github.event.inputs.miui }}" == "true" ]] && REF="${REF}-miui"
@@ -97,6 +98,7 @@ jobs:
                 echo "::group::Applying variants/$1.patch"
                 git apply --verbose --index "variants/$1.patch"
                 echo "::endgroup::"
+                APPLIED_PATCHES="${APPLIED_PATCHES:+$APPLIED_PATCHES, }$1"
               fi
             }
             case "$REF" in
@@ -123,6 +125,7 @@ jobs:
             echo "ZIP_PATH=$ZIP_PATH"
             echo "ZIP_NAME=$ZIP_NAME"
             echo "VERSION_NAME=$VERSION_NAME"
+            echo "APPLIED_PATCHES=${APPLIED_PATCHES:-none}"
             echo "BRANCH_DESC=$BRANCH_DESC"
             echo "GIT_BRANCH=$GIT_BRANCH"
             echo "COMMIT_HASH=$COMMIT_HASH"
@@ -251,7 +254,6 @@ jobs:
             exit 0
           fi
 
-          ZIP_BASE="${ZIP_NAME:-$(basename "$ZIP_FILE")}"
           SHA256="${ZIP_SHA256:-$(sha256sum "$ZIP_FILE" | awk '{print $1}')}"
           SIZE="${ZIP_SIZE_HUMAN:-$(du -h "$ZIP_FILE" | awk '{print $1}')}"
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -263,10 +265,10 @@ jobs:
           [[ -n "${PIXELDRAIN_URL:-}" ]] && LINKS="${LINKS}PixelDrain: ${PIXELDRAIN_URL}"$'\n'
           [[ -z "$LINKS" ]] && LINKS="Mirrors: unavailable (see GitHub release)"$'\n'
 
-          MESSAGE="$(printf 'Pox Kernel %s [%s]\n%s\n\nBranch : %s\nCommit : %s\nKernel : %s\nFile   : %s (%s)\nSHA256 : %s\n%sGitHub : %s' \
-            "${KERNEL_VERSION:-1.0.0-Beta}" "${VERSION_NAME:-Onyx}" "${BRANCH_DESC:-Custom Edition}" \
-            "${GIT_BRANCH:-${GITHUB_REF_NAME}}" "${COMMIT_HASH:-unknown}" "${LOCALVERSION_EXTENDED:-unknown}" \
-            "$ZIP_BASE" "$SIZE" "${SHA256:0:16}..." "$LINKS" "$RUN_URL")"
+          MESSAGE="$(printf 'Pox Kernel %s [%s]\n\nCommit : %s\nKernel : %s\nPatches: %s\nSize   : %s\nSHA256 : %s\n%sGitHub : %s' \
+            "${KERNEL_VERSION:-1.0.0-Beta}" "${VERSION_NAME:-Onyx}" \
+            "${COMMIT_HASH:-unknown}" "${LOCALVERSION_EXTENDED:-unknown}" \
+            "${APPLIED_PATCHES:-none}" "$SIZE" "${SHA256:0:16}..." "$LINKS" "$RUN_URL")"
 
           CHAT_ID="${TELEGRAM_CHAT_ID:-}"
           if [ -z "$CHAT_ID" ]; then
