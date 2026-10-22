@@ -6442,3 +6442,25 @@ index 8f8e2839591b..a728f0054521 100644
  
  /**
   * struct v4l2_exportbuffer - export of video buffer as DMABUF file descriptor
+diff --git a/scripts/Makefile.dtbinst b/scripts/Makefile.dtbinst
+index c8ba6e7f9868..5c9f70393027 100644
+--- a/scripts/Makefile.dtbinst
++++ b/scripts/Makefile.dtbinst
+@@ -22,6 +22,7 @@ include scripts/Kbuild.include
+ include $(src)/Makefile
+ 
+ dtbinst-files	:= $(dtb-y)
++dtboinst-files	:= $(dtbo-y)
+ dtbinst-dirs	:= $(dts-dirs)
+ 
+ # Helper targets for Installing DTBs into the boot directory
+@@ -36,7 +37,7 @@ $(dtbinst-files): %.dtb: $(obj)/%.dtb
+ $(dtbinst-dirs):
+ 	$(Q)$(MAKE) $(dtbinst)=$(obj)/$@
+ 
+-PHONY += $(dtbinst-files) $(dtbinst-dirs)
+-__dtbs_install: $(dtbinst-files) $(dtbinst-dirs)
++PHONY += $(dtbinst-files) $(dtboinst-files) $(dtbinst-dirs)
++__dtbs_install: $(dtbinst-files) $(dtboinst-files) $(dtbinst-dirs)
+ 
+ .PHONY: $(PHONY)
