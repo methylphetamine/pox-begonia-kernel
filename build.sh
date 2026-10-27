@@ -49,12 +49,13 @@ BAKASU_REPO="${BAKASU_REPO:-Baka-SU/BakaSU}"
 KPM_REPO="${KPM_REPO:-methylphetamine/pox-kernel-manager}"
 
 # The BakaSU manager must match the vendored driver, not the moving tip.
-# variants/bakasu.patch pins the driver to BakaSU main f6cb7e70 and exports
-# KSU_VERSION=35226. BakaSU numbers its manager 30000 + commit_count + 700,
-# so v4.2.0-rc3 (4526 commits) is exactly version code 35226.
+# variants/bakasu.patch exports KSU_VERSION=35171, the version code of the
+# published v4.2.0-rc3 manager (commit 239e1e88, 4471 commits). BakaSU
+# numbers its manager 30000 + commit_count + 700, so 30000 + 4471 + 700 is
+# exactly 35171.
 BAKASU_TAG="${BAKASU_TAG:-v4.2.0-rc3}"
 BAKASU_ASSET="${BAKASU_ASSET:-ReSukiSU_v4.2.0-rc3_35171-arm64-v8a-release.apk}"
-BAKASU_DRIVER_VERSION="${BAKASU_DRIVER_VERSION:-35226}"
+BAKASU_DRIVER_VERSION="${BAKASU_DRIVER_VERSION:-35171}"
 
 ROOT_LABEL=""
 ROOT_PACKAGE=""
