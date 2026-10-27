@@ -388,6 +388,14 @@ DATE="$(date +%Y%m%d-%H%M)"
 GIT_BRANCH="${GIT_BRANCH:-${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "onyx")}}"
 GIT_BRANCH="${GIT_BRANCH#refs/heads/}"
 GIT_BRANCH="${GIT_BRANCH#refs/tags/}"
+
+# The KPM branch only delivers the companion APK for manual installation.
+# It never installs a root manager and never removes one.
+if [[ "$GIT_BRANCH" == onyx-kpm* ]]; then
+    POX_STAGE_KPM_APK=1
+    POX_INSTALL_ROOT_MANAGER=0
+    POX_EXCLUSIVE_MANAGERS=0
+fi
 COMMIT_HASH="${COMMIT_HASH:-$(git rev-parse --short=7 HEAD 2>/dev/null || echo "custom")}"
 COMMIT_DATE="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || date +'%Y-%m-%d %H:%M')"
 COMMIT_SUBJECT="$(git log -1 --format=%s 2>/dev/null || echo "Release build")"
