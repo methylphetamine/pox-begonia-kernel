@@ -5263,7 +5263,7 @@ index 000000000000..76c0f5821bd4
 +# CONFIG_STRING_SELFTEST is not set
 +CONFIG_HWCONF_MANAGER=y
 +
-+# BakaSU main f6cb7e70 (4.14 SUSFS inline hook mode)
++# BakaSU v4.2.0-rc3 manager/driver pair (4.14 SUSFS inline hook mode)
 +CONFIG_KSU=y
 +# CONFIG_KSU_DEBUG is not set
 +CONFIG_KSU_TOOLKIT_SUPPORT=y
@@ -5460,15 +5460,17 @@ index 000000000000..f4aa0e0e4dc2
 +include $(KSU_SRC)/tools/ddk_compatible.mk
 +endif
 +
-+# Version identity of the vendored driver: BakaSU main, commit f6cb7e70,
-+# 4526 commits. Pinned because `git rev-list` here would count the *kernel*
-+# repo's history, not the driver's, and produce a version code the manager
-+# rejects.
-+KSU_LOCAL_VERSION := 4526
-+KSU_VERSION := 35226
++# Version identity of the vendored driver, pinned to the published BakaSU
++# v4.2.0-rc3 manager (versionCode 35171, commit 239e1e88, 4471 commits).
++# The 4.14 driver tree carries the later f6cb7e70 integration, but it must
++# report the manager's version code or the manager rejects the kernel as a
++# different build. Never derive these from `git rev-list` here: that counts
++# the kernel tree, not the BakaSU tree.
++KSU_LOCAL_VERSION := 4471
++KSU_VERSION := 35171
 +
 +KSU_TAG_NAME    := v4.2.0-rc3
-+KSU_COMMIT_SHA  := f6cb7e70
++KSU_COMMIT_SHA  := 239e1e88
 +KSU_BRANCH_NAME := onyx-bakasu
 +
 +# call subst to process placeholders
