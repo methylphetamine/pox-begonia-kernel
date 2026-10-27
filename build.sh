@@ -25,6 +25,348 @@ log()  { printf '\033[1;32m[*] %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31m[-] %s\033[0m\n' "$*"; }
 
+# ---------------------------------------------------------------------------
+# Recovery-time root manager delivery
+# ---------------------------------------------------------------------------
+# The root-manager branches ship the matching manager APK inside every
+# AnyKernel3 package. The installer copies it to /system/app/<package> while
+# still in recovery, so Android registers it for user 0 on the next boot.
+# No package manager, init service, or /data write is involved.
+#
+# POX_ROOT_VARIANT selects the manager (folkpatch|apatch|bakasu).
+# POX_INSTALL_ROOT_MANAGER=1 enables the /system/app installation.
+# POX_EXCLUSIVE_MANAGERS=1 also removes the two non-selected managers.
+# POX_STAGE_KPM_APK=1 copies the Pox Kernel Manager APK to internal storage;
+# it is never installed automatically.
+POX_ROOT_VARIANT="${POX_ROOT_VARIANT:-}"
+POX_INSTALL_ROOT_MANAGER="${POX_INSTALL_ROOT_MANAGER:-0}"
+POX_EXCLUSIVE_MANAGERS="${POX_EXCLUSIVE_MANAGERS:-0}"
+POX_STAGE_KPM_APK="${POX_STAGE_KPM_APK:-0}"
+
+FOLKPATCH_REPO="${FOLKPATCH_REPO:-LyraVoid/FolkPatch}"
+APATCH_REPO="${APATCH_REPO:-bmax121/APatch}"
+BAKASU_REPO="${BAKASU_REPO:-Baka-SU/BakaSU}"
+KPM_REPO="${KPM_REPO:-methylphetamine/pox-kernel-manager}"
+
+# The BakaSU manager must match the vendored driver, not the moving tip.
+# variants/bakasu.patch pins the driver to BakaSU main f6cb7e70 and exports
+# KSU_VERSION=35226. BakaSU numbers its manager 30000 + commit_count + 700,
+# so v4.2.0-rc3 (4526 commits) is exactly version code 35226.
+BAKASU_TAG="${BAKASU_TAG:-v4.2.0-rc3}"
+BAKASU_ASSET="${BAKASU_ASSET:-ReSukiSU_v4.2.0-rc3_35171-arm64-v8a-release.apk}"
+BAKASU_DRIVER_VERSION="${BAKASU_DRIVER_VERSION:-35226}"
+
+ROOT_LABEL=""
+ROOT_PACKAGE=""
+ROOT_APK_NAME=""
+ROOT_FLASHABLE="0"
+KPM_APK_NAME=""
+
+github_latest_apk_url() {
+    local repo="$1" pattern="${2:-\.apk$}"
+    local api="https://api.github.com/repos/${repo}/releases/latest"
+    local json=""
+    local -a auth=()
+
+    command -v curl >/dev/null 2>&1 || return 1
+    [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+
+    json="$(curl -fsSL "${auth[@]}" "$api" 2>/dev/null)" || return 1
+    printf '%s' "$json" | python3 -c '
+import json, re, sys
+pattern = re.compile(sys.argv[1])
+release = json.load(sys.stdin)
+for asset in release.get("assets", []):
+    if pattern.search(asset.get("name", "")):
+        print(asset["browser_download_url"])
+        break
+' "$pattern"
+}
+
+download_latest_apk() {
+    local repo="$1" dest="$2" pattern="$3" label="$4" url=""
+
+    url="$(github_latest_apk_url "$repo" "$pattern")"
+    if [[ -z "$url" ]]; then
+        err "Could not resolve the latest ${label} APK from ${repo}."
+        return 1
+    fi
+
+    log "Downloading ${label} release: $(basename "$url")"
+    curl -fL --retry 3 --connect-timeout 20 -o "$dest" "$url" || {
+        err "Failed to download ${label} APK."
+        return 1
+    }
+}
+
+download_pinned_apk() {
+    local repo="$1" tag="$2" asset="$3" dest="$4" label="$5"
+    local url="https://github.com/${repo}/releases/download/${tag}/${asset}"
+
+    log "Downloading pinned ${label} release: ${tag}/${asset}"
+    curl -fL --retry 3 --connect-timeout 20 -o "$dest" "$url" || {
+        err "Failed to download ${label} ${tag} (${asset})."
+        return 1
+    }
+}
+
+resolve_root_manager() {
+    case "$POX_ROOT_VARIANT" in
+        folkpatch)
+            ROOT_LABEL="FolkPatch"
+            ROOT_PACKAGE="me.yuki.folk"
+            ROOT_APK_NAME="FolkPatch.apk"
+            ROOT_FLASHABLE="1"
+            ;;
+        apatch)
+            ROOT_LABEL="APatch"
+            ROOT_PACKAGE="me.bmax.apatch"
+            ROOT_APK_NAME="APatch.apk"
+            ROOT_FLASHABLE="1"
+            ;;
+        bakasu)
+            ROOT_LABEL="BakaSU"
+            ROOT_PACKAGE="com.resukisu.resukisu"
+            ROOT_APK_NAME="BakaSU.apk"
+            ROOT_FLASHABLE="0"
+            ;;
+        "")
+            return 0
+            ;;
+        *)
+            err "Unknown POX_ROOT_VARIANT: ${POX_ROOT_VARIANT}"
+            exit 1
+            ;;
+    esac
+}
+
+fetch_root_manager_apk() {
+    local dest="$1"
+
+    case "$POX_ROOT_VARIANT" in
+        folkpatch)
+            download_latest_apk "$FOLKPATCH_REPO" "$dest" '\.apk$' "FolkPatch"
+            ;;
+        apatch)
+            download_latest_apk "$APATCH_REPO" "$dest" '\.apk$' "APatch"
+            ;;
+        bakasu)
+            assert_bakasu_driver_version
+            download_pinned_apk "$BAKASU_REPO" "$BAKASU_TAG" "$BAKASU_ASSET" "$dest" "BakaSU"
+            ;;
+        *)
+            err "No root manager configured for POX_ROOT_VARIANT='${POX_ROOT_VARIANT}'."
+            return 1
+            ;;
+    esac
+}
+
+assert_bakasu_driver_version() {
+    local kbuild="drivers/kernelsu/Kbuild"
+    local driver_version=""
+
+    [[ -f "$kbuild" ]] || {
+        err "BakaSU driver is missing (${kbuild}); apply variants/bakasu.patch first."
+        return 1
+    }
+    driver_version="$(awk -F':=' '/^KSU_VERSION[[:space:]]*:=/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' "$kbuild")"
+    if [[ "$driver_version" != "$BAKASU_DRIVER_VERSION" ]]; then
+        err "BakaSU driver version ${driver_version:-unknown} does not match manager ${BAKASU_TAG} (${BAKASU_DRIVER_VERSION})."
+        return 1
+    fi
+    log "BakaSU driver/manager version verified: ${driver_version} (${BAKASU_TAG})"
+}
+
+fetch_kpm_apk() {
+    local dest_dir="$1" url="" tag=""
+
+    url="$(github_latest_apk_url "$KPM_REPO" '\.apk$')"
+    if [[ -z "$url" ]]; then
+        err "Could not resolve the latest Pox Kernel Manager APK from ${KPM_REPO}."
+        return 1
+    fi
+    tag="$(printf '%s' "$url" | sed -E 's#.*/download/([^/]+)/.*#\1#')"
+    [[ -n "$tag" && "$tag" != "$url" ]] || tag="latest"
+    KPM_APK_NAME="Pox-Kernel-Manager-${tag}.apk"
+
+    log "Downloading Pox Kernel Manager release: $(basename "$url")"
+    curl -fL --retry 3 --connect-timeout 20 -o "$dest_dir/$KPM_APK_NAME" "$url" || {
+        err "Failed to download Pox Kernel Manager APK."
+        return 1
+    }
+}
+
+write_pox_install_helper() {
+    local stage="$1" others="" pkg
+
+    case "$POX_ROOT_VARIANT" in
+        folkpatch) others="me.bmax.apatch com.resukisu.resukisu" ;;
+        apatch)    others="me.yuki.folk com.resukisu.resukisu" ;;
+        bakasu)    others="me.yuki.folk me.bmax.apatch" ;;
+    esac
+
+    cat <<'POX_HELPER_EOF' > "$stage/pox_install.sh"
+#!/system/bin/sh
+# Pox Kernel recovery post-install helper.
+# Installs the selected root manager as a system app for user 0 and optionally
+# removes the other root managers. Recovery never talks to the package manager.
+
+ROOT_VARIANT="@ROOT_VARIANT@"
+ROOT_LABEL="@ROOT_LABEL@"
+ROOT_PACKAGE="@ROOT_PACKAGE@"
+ROOT_APK="@ROOT_APK@"
+ROOT_FLASHABLE="@ROOT_FLASHABLE@"
+INSTALL_ROOT="@INSTALL_ROOT@"
+EXCLUSIVE="@EXCLUSIVE@"
+OTHER_PACKAGES="@OTHER_PACKAGES@"
+STAGE_KPM="@STAGE_KPM@"
+KPM_APK="@KPM_APK@"
+
+pox_log() {
+    if command -v ui_print >/dev/null 2>&1; then
+        ui_print " [*] $*"
+    else
+        echo " [*] $*"
+    fi
+}
+
+pox_system_root() {
+    local d
+    for d in /system /system_root/system /system_root; do
+        [ -d "$d/app" ] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+
+pox_mount_system() {
+    local d
+    for d in /system_root /system; do
+        if grep -q " $d " /proc/mounts 2>/dev/null; then
+            mount -o rw,remount "$d" 2>/dev/null && { echo "$d"; return 0; }
+        fi
+    done
+    for d in \
+        /dev/block/bootdevice/by-name/system \
+        /dev/block/by-name/system \
+        /dev/block/platform/bootdevice/by-name/system; do
+        [ -b "$d" ] || continue
+        mkdir -p /system_root
+        if mount -o rw "$d" /system_root 2>/dev/null; then
+            pox_system_root || echo /system_root
+            return 0
+        fi
+    done
+    if [ -d /system ]; then
+        mount -o rw,remount / 2>/dev/null && { echo /system; return 0; }
+    fi
+    return 1
+}
+
+pox_flash_root_package() {
+    local src="$1" tmp="/dev/tmp/pox-root-install" bb="/dev/tmp/pox-root-busybox"
+
+    rm -rf "$tmp"
+    mkdir -p "$tmp"
+    if unzip -o "$src" "lib/arm64-v8a/libbusybox.so" -d /dev/tmp >/dev/null 2>&1; then
+        mv -f /dev/tmp/lib/arm64-v8a/libbusybox.so "$bb" 2>/dev/null
+        chmod 755 "$bb" 2>/dev/null
+        rm -rf /dev/tmp/lib
+    fi
+    unzip -o "$src" "assets/*" "lib/*" -x "lib/*/libbusybox.so" -d "$tmp" >/dev/null 2>&1
+    if [ -f "$tmp/assets/InstallAP.sh" ]; then
+        chmod -R 755 "$tmp/assets" "$tmp/lib" 2>/dev/null
+        if [ -x "$bb" ]; then
+            ( cd "$tmp" && ASH_STANDALONE=1 "$bb" sh assets/InstallAP.sh 3 "$OUTFD" "$src" )
+        else
+            ( cd "$tmp" && sh assets/InstallAP.sh 3 "$OUTFD" "$src" )
+        fi
+        pox_log "$ROOT_LABEL kernel patch step complete."
+    else
+        pox_log "$ROOT_LABEL package has no InstallAP.sh; skipping kernel patch step."
+    fi
+}
+
+pox_remove_others() {
+    local pkg base
+    for pkg in $OTHER_PACKAGES; do
+        for base in /system /system_root/system /system_root; do
+            rm -rf "$base/app/$pkg" "$base/priv-app/$pkg" \
+                   "$base/app/$pkg.apk" "$base/priv-app/$pkg.apk" 2>/dev/null || true
+        done
+        # Residual user-installed copies from earlier flashes. The system copy
+        # is the authoritative one; data cleanup is best effort.
+        rm -rf /data/app/*"$pkg"* /data/data/"$pkg" \
+               /data/user/0/"$pkg" /data/user_de/0/"$pkg" 2>/dev/null || true
+        pox_log "Removed residual $pkg manager."
+    done
+}
+
+pox_install_root_manager() {
+    local src="$AKHOME/$ROOT_APK" sys dest
+
+    [ "$INSTALL_ROOT" = "1" ] || return 0
+    [ -f "$src" ] || { pox_log "Missing $ROOT_APK in package."; return 1; }
+
+    if [ "$ROOT_FLASHABLE" = "1" ]; then
+        pox_flash_root_package "$src"
+    fi
+
+    sys="$(pox_mount_system)" || {
+        pox_log "Cannot mount /system read-write; $ROOT_LABEL was not installed."
+        return 1
+    }
+    dest="$sys/app/$ROOT_PACKAGE"
+    rm -rf "$dest"
+    mkdir -p "$dest" || return 1
+    cp -f "$src" "$dest/$ROOT_PACKAGE.apk" || return 1
+    chown 0:0 "$dest" "$dest/$ROOT_PACKAGE.apk" 2>/dev/null || true
+    chmod 0755 "$dest"
+    chmod 0644 "$dest/$ROOT_PACKAGE.apk"
+    chcon u:object_r:system_file:s0 "$dest" "$dest/$ROOT_PACKAGE.apk" 2>/dev/null || true
+    pox_log "Installed $ROOT_LABEL to $dest/$ROOT_PACKAGE.apk"
+
+    [ "$EXCLUSIVE" = "1" ] && pox_remove_others
+    return 0
+}
+
+pox_stage_kpm_apk() {
+    local d source="$AKHOME/$KPM_APK"
+
+    [ "$STAGE_KPM" = "1" ] || return 0
+    [ -f "$source" ] || { pox_log "Missing $KPM_APK in package."; return 1; }
+
+    for d in /sdcard/Download /data/media/0/Download \
+             /storage/emulated/0/Download /sdcard /data/local/tmp; do
+        [ -d "$d" ] || continue
+        if cp -f "$source" "$d/$KPM_APK" 2>/dev/null; then
+            chmod 0644 "$d/$KPM_APK" 2>/dev/null || true
+            pox_log "Copied $KPM_APK to $d (install it manually)."
+        fi
+    done
+    return 0
+}
+
+pox_post_install() {
+    pox_install_root_manager
+    pox_stage_kpm_apk
+}
+POX_HELPER_EOF
+
+    sed -i \
+        -e "s|@ROOT_VARIANT@|${POX_ROOT_VARIANT}|g" \
+        -e "s|@ROOT_LABEL@|${ROOT_LABEL}|g" \
+        -e "s|@ROOT_PACKAGE@|${ROOT_PACKAGE}|g" \
+        -e "s|@ROOT_APK@|${ROOT_APK_NAME}|g" \
+        -e "s|@ROOT_FLASHABLE@|${ROOT_FLASHABLE}|g" \
+        -e "s|@INSTALL_ROOT@|${POX_INSTALL_ROOT_MANAGER}|g" \
+        -e "s|@EXCLUSIVE@|${POX_EXCLUSIVE_MANAGERS}|g" \
+        -e "s|@OTHER_PACKAGES@|${others}|g" \
+        -e "s|@STAGE_KPM@|${POX_STAGE_KPM_APK}|g" \
+        -e "s|@KPM_APK@|${KPM_APK_NAME}|g" \
+        "$stage/pox_install.sh"
+    chmod 0755 "$stage/pox_install.sh"
+}
+
 # Determine safe parallel jobs based on available RAM and load to protect host PC from freezing
 auto_jobs() {
     local mem_avail_kb
@@ -361,6 +703,26 @@ package_zip() {
     mkdir -p "$stage"
     cp -r "$AK3_DIR/." "$stage/"
     cp "$image" "$stage/Image.gz-dtb"
+
+    # Fetch the recovery-time payloads before generating anykernel.sh so a
+    # download failure fails the build instead of silently shipping a zip
+    # without the manager the branch promises.
+    resolve_root_manager
+    if [[ "$POX_INSTALL_ROOT_MANAGER" == "1" ]]; then
+        if [[ -z "$ROOT_APK_NAME" ]]; then
+            err "POX_INSTALL_ROOT_MANAGER=1 requires POX_ROOT_VARIANT (folkpatch|apatch|bakasu)."
+            exit 1
+        fi
+        fetch_root_manager_apk "$stage/$ROOT_APK_NAME" || exit 1
+        chmod 0644 "$stage/$ROOT_APK_NAME"
+    fi
+    if [[ "$POX_STAGE_KPM_APK" == "1" ]]; then
+        fetch_kpm_apk "$stage" || exit 1
+        chmod 0644 "$stage/$KPM_APK_NAME"
+    fi
+    if [[ "$POX_INSTALL_ROOT_MANAGER" == "1" || "$POX_STAGE_KPM_APK" == "1" ]]; then
+        write_pox_install_helper "$stage"
+    fi
 
     local commit_hash commit_date commit_subject kver toolchain_ver git_branch
     commit_hash="$(git rev-parse --short HEAD 2>/dev/null || echo "custom")"
@@ -842,6 +1204,14 @@ ui_print "     - Zero Frame-Drop Gaming Mode: active on ROM Performance toggle";
 ui_print "     - FPSGO Ultra-Rescue + Mali-G76 MC4 Touch Boost: enabled";
 ui_print "     - Universal USB OTG: DACs, controllers, serial & ethernet active";
 write_boot;
+
+## Root manager / Pox Kernel Manager delivery (generated by build.sh).
+## pox_install.sh runs inside recovery: it installs the selected manager into
+## /system/app for user 0 and/or copies the KPM APK to internal storage.
+if [ -f "\$AKHOME/pox_install.sh" ]; then
+    . "\$AKHOME/pox_install.sh";
+    pox_post_install;
+fi;
 
 ui_print " [*] [4/4] Cleaning up temporary installer files...";
 ui_print " ";
