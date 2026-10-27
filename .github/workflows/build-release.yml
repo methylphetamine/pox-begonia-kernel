@@ -39,8 +39,100 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Plan Root Variant Builds
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Resolve Build Matrix
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_ROOT: ${{ github.event.inputs.root }}
+          INPUT_MIUI: ${{ github.event.inputs.miui }}
+          INPUT_C2: ${{ github.event.inputs.c2 }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          ref = os.environ.get("REF_NAME", "")
+          event = os.environ.get("EVENT_NAME", "")
+          labels = {"folkpatch": "FolkPatch", "apatch": "APatch", "bakasu": "BakaSU"}
+
+          def entry(**overrides):
+              item = {
+                  "ref": ref,
+                  "variant": "",
+                  "patch": "",
+                  "version_name": "",
+                  "description": "",
+                  "install_root": "0",
+                  "stage_kpm": "0",
+                  "exclusive": "0",
+              }
+              item.update(overrides)
+              return item
+
+          if event == "workflow_dispatch":
+              base = os.environ.get("INPUT_ROOT", "onyx")
+              miui = os.environ.get("INPUT_MIUI", "false") == "true"
+              c2 = os.environ.get("INPUT_C2", "false") == "true"
+              if miui and c2:
+                  raise SystemExit("miui and c2 overlays are mutually exclusive")
+              if miui:
+                  base += "-miui"
+              if c2:
+                  base += "-c2"
+              patches = []
+              if "apatch" in base or "folkpatch" in base:
+                  patches.append("apatch")
+              elif "ksu" in base:
+                  patches.append("ksun")
+              elif "bakasu" in base:
+                  patches.append("bakasu")
+              if miui:
+                  patches.append("miui")
+              if c2:
+                  patches.append("c2")
+              print("matrix=" + json.dumps({"include": [entry(ref=base, patch=",".join(patches))]}))
+          elif ref.startswith("onyx-kpm") or ref.startswith("onyx-root-managers"):
+              is_kpm = ref.startswith("onyx-kpm")
+              is_root = ref.startswith("onyx-root-managers")
+              exclusive = ref.endswith("-exclusive")
+              entries = []
+              for variant in ("folkpatch", "apatch", "bakasu"):
+                  patch = "bakasu" if variant == "bakasu" else "apatch"
+                  version = ("Onyx-KPM-" if is_kpm else "Onyx-") + labels[variant]
+                  if exclusive:
+                      version += "-Exclusive"
+                  desc = "Onyx gaming & Pox Kernel Manager APK (manual install)"
+                  if is_root:
+                      desc = "Onyx gaming & %s manager installed at flash time" % labels[variant]
+                      if exclusive:
+                          desc += "; other managers removed"
+                  entries.append(entry(
+                      variant=variant,
+                      patch=patch,
+                      version_name=version,
+                      description=desc,
+                      install_root="1" if is_root else "0",
+                      stage_kpm="1" if is_kpm else "0",
+                      exclusive="1" if exclusive else "0",
+                  ))
+              print("matrix=" + json.dumps({"include": entries}))
+          else:
+              print("matrix=" + json.dumps({"include": [entry()]}))
+          PY
+
   build:
     name: Build & Release Pox Kernel
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -50,6 +142,23 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Apply Variant Patches
+        if: matrix.patch != ''
+        run: |
+          IFS=',' read -ra patches <<< "${{ matrix.patch }}"
+          for patch in "${patches[@]}"; do
+            [[ -n "$patch" ]] || continue
+            if [[ ! -f "variants/${patch}.patch" ]]; then
+              echo "::error::variants/${patch}.patch is missing"
+              exit 1
+            fi
+            echo "::group::Applying variants/${patch}.patch"
+            git apply --verbose --index "variants/${patch}.patch"
+            echo "::endgroup::"
+          done
+          # git apply only creates submodule gitlinks (KernelSU); check them out.
+          git submodule update --init --recursive
 
       - name: Install Host Build Dependencies
         run: |
@@ -81,47 +190,31 @@ jobs:
 
       - name: Build Pox Kernel & Flashable Zip
         id: build_kernel
+        env:
+          POX_ROOT_VARIANT: ${{ matrix.variant }}
+          POX_INSTALL_ROOT_MANAGER: ${{ matrix.install_root }}
+          POX_EXCLUSIVE_MANAGERS: ${{ matrix.exclusive }}
+          POX_STAGE_KPM_APK: ${{ matrix.stage_kpm }}
+          POX_VERSION_NAME: ${{ matrix.version_name }}
+          POX_DESCRIPTION: ${{ matrix.description }}
+          APPLIED_PATCHES: ${{ matrix.patch }}
         run: |
           bash kerdevdep/setup_kerdevdep.sh
-          # A single branch can build any root flavor from a manual dispatch:
-          # the chosen inputs are folded into GIT_BRANCH, which build.sh's
-          # resolver turns into the edition name + defconfig, and the matching
-          # patch set under variants/ is applied to the tree before building.
-          APPLIED_PATCHES=""
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # MIUI and C2 both rewrite overlapping vendor media/perf code, so a
-            # combined overlay produces a tree neither downstream supports.
-            if [[ "${{ github.event.inputs.miui }}" == "true" && "${{ github.event.inputs.c2 }}" == "true" ]]; then
-              echo "::error::miui and c2 overlays are mutually exclusive - enable at most one"
-              exit 1
-            fi
-            REF="${{ github.event.inputs.root }}"
-            [[ "${{ github.event.inputs.miui }}" == "true" ]] && REF="${REF}-miui"
-            [[ "${{ github.event.inputs.c2 }}" == "true" ]] && REF="${REF}-c2"
 
-            apply_patch() {
-              if [[ -f "variants/$1.patch" ]]; then
-                echo "::group::Applying variants/$1.patch"
-                git apply --verbose --index "variants/$1.patch"
-                echo "::endgroup::"
-                APPLIED_PATCHES="${APPLIED_PATCHES:+$APPLIED_PATCHES, }$1"
-              fi
-            }
-            case "$REF" in
-              *apatch*|*folkpatch*) apply_patch apatch ;;
-              *ksu*)                apply_patch ksun ;;
-              *bakasu*)             apply_patch bakasu ;;
-            esac
-            if [[ "$REF" == *miui* ]]; then apply_patch miui; fi
-            if [[ "$REF" == *c2* ]]; then apply_patch c2; fi
-          else
-            REF="${{ github.ref_name }}"
+          # Root-variant branches carry their display name and description in
+          # the matrix. Plain branch pushes still let build.sh resolve the
+          # edition from the branch name.
+          if [[ -n "${POX_VERSION_NAME:-}" ]]; then
+            export VERSION_NAME="$POX_VERSION_NAME"
+            export BRANCH_DESC="${POX_DESCRIPTION:-Custom Edition}"
           fi
-          # Ensure any submodule (e.g. KernelSU, added by variants/ksun.patch) is
-          # actually checked out; git apply only creates the gitlink.
-          git submodule update --init --recursive
-          export GITHUB_REF_NAME="$REF"
-          export GIT_BRANCH="$REF"
+          case "${POX_ROOT_VARIANT:-}" in
+            folkpatch|apatch) export DEFCONFIG="begonia_apatch_defconfig" ;;
+            bakasu)           export DEFCONFIG="bakasu_defconfig" ;;
+          esac
+
+          export GITHUB_REF_NAME="${{ matrix.ref }}"
+          export GIT_BRANCH="${{ matrix.ref }}"
           ./build.sh all
 
           # build.sh is the single source of truth for artifact identity.
