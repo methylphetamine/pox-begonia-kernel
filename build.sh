@@ -153,7 +153,8 @@ fetch_root_manager_apk() {
             ;;
         bakasu)
             assert_bakasu_driver_version
-            download_pinned_apk "$BAKASU_REPO" "$BAKASU_TAG" "$BAKASU_ASSET" "$dest" "BakaSU"
+            download_pinned_apk "$BAKASU_REPO" "$BAKASU_TAG" "$BAKASU_ASSET" "$dest" "BakaSU" || return 1
+            assert_apk_version_code "$dest" "$BAKASU_DRIVER_VERSION"
             ;;
         *)
             err "No root manager configured for POX_ROOT_VARIANT='${POX_ROOT_VARIANT}'."
@@ -176,6 +177,23 @@ assert_bakasu_driver_version() {
         return 1
     fi
     log "BakaSU driver/manager version verified: ${driver_version} (${BAKASU_TAG})"
+}
+
+assert_apk_version_code() {
+    local apk="$1" expected="$2" actual=""
+
+    if ! command -v aapt >/dev/null 2>&1; then
+        warn "aapt is unavailable; skipping APK versionCode verification for $(basename "$apk")."
+        return 0
+    fi
+    actual="$(aapt dump badging "$apk" 2>/dev/null \
+        | sed -n "s/.*versionCode='\([0-9][0-9]*\)'.*/\1/p" \
+        | head -n1)"
+    if [[ "$actual" != "$expected" ]]; then
+        err "$(basename "$apk") reports versionCode ${actual:-unknown}, expected ${expected}."
+        return 1
+    fi
+    log "APK versionCode verified: ${actual} ($(basename "$apk"))"
 }
 
 fetch_kpm_apk() {
