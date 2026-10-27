@@ -388,6 +388,12 @@ DATE="$(date +%Y%m%d-%H%M)"
 GIT_BRANCH="${GIT_BRANCH:-${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "onyx")}}"
 GIT_BRANCH="${GIT_BRANCH#refs/heads/}"
 GIT_BRANCH="${GIT_BRANCH#refs/tags/}"
+
+# The exclusive branches are self-contained: building them locally (without
+# the CI matrix env) still removes the two non-selected root managers.
+if [[ "$GIT_BRANCH" == *exclusive* ]]; then
+    POX_EXCLUSIVE_MANAGERS=1
+fi
 COMMIT_HASH="${COMMIT_HASH:-$(git rev-parse --short=7 HEAD 2>/dev/null || echo "custom")}"
 COMMIT_DATE="$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M' 2>/dev/null || date +'%Y-%m-%d %H:%M')"
 COMMIT_SUBJECT="$(git log -1 --format=%s 2>/dev/null || echo "Release build")"
