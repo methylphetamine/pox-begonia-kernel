@@ -449,3 +449,54 @@ index ba14ca3f1..4664b43d1 100755
          ./scripts/config --file "$OUT_DIR/.config" --set-str LOCALVERSION "$CUSTOM_LOCALVERSION"
          ./scripts/config --file "$OUT_DIR/.config" --disable LOCALVERSION_AUTO
          # shellcheck disable=SC2086
+diff --git a/drivers/misc/mediatek/pmic/mt6360/pmu/mt6360_pmu_rgbled.c b/drivers/misc/mediatek/pmic/mt6360/pmu/mt6360_pmu_rgbled.c
+index ebd0e11..f36bd38 100644
+--- a/drivers/misc/mediatek/pmic/mt6360/pmu/mt6360_pmu_rgbled.c
++++ b/drivers/misc/mediatek/pmic/mt6360/pmu/mt6360_pmu_rgbled.c
+@@ -967,20 +967,13 @@ static void mt6360_led_bright_set(
+ 	}
+ 
+ 	if (!bright) {
+-		cancel_delayed_work_sync(&rgbled_info->dwork);
+-		led->blink_delay_on = 0;
+-		led->blink_delay_off = 0;
+-		mt6360_rgbled_change_mode(led, MT_LED_CC_MODE);
+ 		ret = mt6360_pmu_reg_update_bits(
+ 			rgbled_info->mpi, MT6360_PMU_RGB_EN,
+ 			en_mask, ~en_mask);
+ 		if (ret < 0)
+ 			dev_err(led->dev, "update enable bit fail\n");
+-	} else {
+-		if (!led->blink_delay_on || !led->blink_delay_off)
+-			mt6360_rgbled_change_mode(led, MT_LED_CC_MODE);
++	} else
+ 		mt6360_led_enable_dwork(led);
+-	}
+ }
+ 
+ static enum led_brightness mt6360_led_bright_get(struct led_classdev *led)
+@@ -1099,7 +1092,7 @@ static inline int mt6360_led_config_pwm(struct led_classdev *led,
+ static int mt6360_led_blink_set(struct led_classdev *led,
+ 	unsigned long *delay_on, unsigned long *delay_off)
+ {
+-	int mode_sel = MT_LED_BREATH_MODE;
++	int mode_sel = MT_LED_PWM_MODE;
+ 	int led_index = mt6360_led_get_index(led);
+ 	int ret = 0;
+ 
+@@ -1120,15 +1113,6 @@ static int mt6360_led_blink_set(struct led_classdev *led,
+ 	if (ret < 0)
+ 		dev_err(led->dev, "%s: change mode fail\n", __func__);
+ 
+-	led->blink_delay_on = *delay_on;
+-	led->blink_delay_off = *delay_off;
+-	if (!led->brightness) {
+-		led->brightness = led->max_brightness;
+-		mt6360_led_bright_set(led, led->brightness);
+-	} else {
+-		mt6360_led_enable_dwork(led);
+-	}
+-
+ 	return ret;
+ }
+ 
